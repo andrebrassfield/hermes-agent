@@ -1,0 +1,8 @@
+name: obsidian-sync
+version: 1.0.0
+description: "Search a local Obsidian vault for markdown notes. Exposes search_obsidian tool that queries .md files and returns top matches with path and snippet."
+author: NousResearch
+kind: backend
+provides_tools:
+  - search_obsidian
+api: plugin_api.py

@@ -2329,6 +2329,21 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 "error": f"MCP server '{server_name}' is not connected"
             }, ensure_ascii=False)
 
+        # Auto-inject projectPath when the tool's schema defines it but the
+        # LLM didn't supply it. Several code-intelligence MCP servers (CodeGraph
+        # etc.) default to the stdio parent process working directory when
+        # projectPath is omitted, which is almost never the project the agent
+        # is working on — causing empty results and confusing the model.
+        if "projectPath" not in args:
+            for _tool in (server._tools or []):
+                if _tool.name == tool_name:
+                    _schema = getattr(_tool, "inputSchema", None) or {}
+                    if isinstance(_schema, dict):
+                        _props = _schema.get("properties", {}) or {}
+                        if isinstance(_props, dict) and "projectPath" in _props:
+                            args = {**args, "projectPath": os.getcwd()}
+                    break
+
         async def _call():
             async with server._rpc_lock:
                 result = await server.session.call_tool(tool_name, arguments=args)

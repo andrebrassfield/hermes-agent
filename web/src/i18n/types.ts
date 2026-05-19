@@ -439,6 +439,25 @@ export interface Translations {
     expiresIn: string;
   };
 
+  // ── Telegram page ──
+  telegram: {
+    title: string;
+    connectionStatus: string;
+    botConfig: string;
+    botToken: string;
+    allowedUsers: string;
+    groupChats: string;
+    gateway: string;
+    recentSessions: string;
+    noSessions: string;
+    notConfigured: string;
+    gettingStarted: string;
+    gsCreateBot: string;
+    gsSetToken: string;
+    gsSetUsers: string;
+    gsRestart: string;
+  };
+
   // ── Language switcher ──
   language: {
     switchTo: string;

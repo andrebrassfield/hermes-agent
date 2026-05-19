@@ -29,6 +29,7 @@ import {
   Heart,
   KeyRound,
   Menu,
+  MessageCircle,
   MessageSquare,
   Package,
   Puzzle,
@@ -66,6 +67,7 @@ import CronPage from "@/pages/CronPage";
 import ProfilesPage from "@/pages/ProfilesPage";
 import SkillsPage from "@/pages/SkillsPage";
 import PluginsPage from "@/pages/PluginsPage";
+import TelegramPage from "@/pages/TelegramPage";
 import ChatPage from "@/pages/ChatPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
@@ -118,6 +120,7 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/config": ConfigPage,
   "/env": EnvPage,
   "/docs": DocsPage,
+  "/telegram": TelegramPage,
 };
 
 // Route placeholder for /chat.  The persistent ChatPage host (rendered
@@ -154,6 +157,12 @@ const BUILTIN_NAV_REST: NavItem[] = [
   { path: "/profiles", labelKey: "profiles", label: "Profiles", icon: Users },
   { path: "/config", labelKey: "config", label: "Config", icon: Settings },
   { path: "/env", labelKey: "keys", label: "Keys", icon: KeyRound },
+  {
+    path: "/telegram",
+    labelKey: "telegram",
+    label: "Telegram",
+    icon: MessageCircle,
+  },
   {
     path: "/docs",
     labelKey: "documentation",

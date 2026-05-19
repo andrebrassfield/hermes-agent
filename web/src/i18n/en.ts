@@ -697,4 +697,23 @@ export const en: Translations = {
     logTruncated: "(showing last 100 KB — full log at ",
     logAt: ")",
   },
+
+  // ── Telegram page ──
+  telegram: {
+    title: "Telegram",
+    connectionStatus: "Connection Status",
+    botConfig: "Bot Configuration",
+    botToken: "Bot Token",
+    allowedUsers: "Allowed Users",
+    groupChats: "Group Chats",
+    gateway: "Gateway",
+    recentSessions: "Recent Telegram Sessions",
+    noSessions: "No Telegram sessions yet",
+    notConfigured: "Telegram not configured",
+    gettingStarted: "Getting Started",
+    gsCreateBot: "Create a bot via",
+    gsSetToken: "Set TELEGRAM_BOT_TOKEN in .env",
+    gsSetUsers: "Add your user ID to allowed_user_ids",
+    gsRestart: "Restart the gateway to connect",
+  },
 };

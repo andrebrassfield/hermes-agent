@@ -157,6 +157,40 @@ def check_telegram_requirements() -> bool:
     return True
 
 
+import time
+import uuid as _uuid
+import subprocess
+
+# Trigger patterns for Mavis switchboard.
+# Matched before any other Hermes processing.
+_MAVIS_TRIGGER_PATTERNS = [
+    re.compile(r'^/mavis\b', re.IGNORECASE),
+    re.compile(r'^@mavis\b', re.IGNORECASE),
+    re.compile(r'^mavis\s*,\s*', re.IGNORECASE),
+    re.compile(r'^mavis\s*:\s*', re.IGNORECASE),
+]
+# Timeout for the Mavis relay call (seconds).
+_MAVIS_RELAY_TIMEOUT = 60
+# Andre's active Mavis session (confirmed live via mavis communication peers).
+_MAVIS_SESSION_ID = "mvs_c3d6318ad5924526880067c19ac0cfdc"
+
+
+def _is_mavis_trigger(text: str) -> bool:
+    """Return True if `text` starts with a Mavis trigger pattern."""
+    if not text:
+        return False
+    return any(pat.search(text.strip()) for pat in _MAVIS_TRIGGER_PATTERNS)
+
+
+def _strip_mavis_trigger(text: str) -> str:
+    """Remove the Mavis trigger prefix from `text`."""
+    for pat in _MAVIS_TRIGGER_PATTERNS:
+        m = pat.search(text.strip())
+        if m:
+            return text[m.end():].strip()
+    return text
+
+
 # Matches every character that MarkdownV2 requires to be backslash-escaped
 # when it appears outside a code span or fenced code block.
 _MDV2_ESCAPE_RE = re.compile(r'([_*\[\]()~`>#\+\-=|{}.!\\])')
@@ -4001,9 +4035,24 @@ class TelegramAdapter(BasePlatformAdapter):
         Telegram clients split long messages into multiple updates.  Buffer
         rapid successive text messages from the same user/chat and aggregate
         them into a single MessageEvent before dispatching.
+
+        Mavis Switchboard: messages matching the Mavis trigger pattern
+        (/mavis, @mavis, "Mavis, ") are intercepted and relayed directly to
+        Andre's Mavis session instead of going through the default Hermes agent.
+        Responses are sent back to Telegram in-place.
         """
         if not update.message or not update.message.text:
             return
+
+        raw_text = update.message.text or ""
+        stripped = raw_text.strip()
+
+        # ── Mavis Switchboard ────────────────────────────────────────────
+        if _is_mavis_trigger(stripped):
+            logger.info("[%s] Mavis switchboard triggered: %r", self.name, stripped[:80])
+            await self._route_mavis_switchboard(update.message, stripped)
+            return  # short-circuit — do not pass to Hermes agent
+
         if not self._should_process_message(update.message):
             return
 
@@ -4011,13 +4060,165 @@ class TelegramAdapter(BasePlatformAdapter):
         event.text = self._clean_bot_trigger_text(event.text)
         self._enqueue_text_event(event)
 
+    # ── Mavis Switchboard ───────────────────────────────────────────────────────
+
+    async def _route_mavis_switchboard(self, message: Message, raw_text: str) -> None:
+        """
+        Relay a Mavis-triggered Telegram message to Andre's Mavis session
+        and send the response back to the Telegram chat.
+
+        Flow:
+          1. Strip the trigger prefix to get the user prompt.
+          2. Deliver the prompt via mavis communication send with a correlation
+             marker so we can pick the right reply out of the message ledger.
+          3. Poll until the session reply appears or timeout is reached.
+          4. Send the response text back to Telegram as MarkdownV2.
+        """
+        prompt = _strip_mavis_trigger(raw_text)
+        if not prompt:
+            prompt = "—"  # empty after strip → no-op
+
+        chat_id = getattr(getattr(message, "chat", None), "id", None)
+        if chat_id is None:
+            logger.warning("[%s] Mavis switchboard: no chat_id on message, dropping", self.name)
+            return
+
+        # Send a "thinking…" indicator to Telegram
+        thinking_msg_id: Optional[int] = None
+        try:
+            sent = await self._bot.send_message(
+                chat_id=chat_id,
+                text="*Mavis is thinking…*",
+                parse_mode=ParseMode.MARKDOWN_V2 if ParseMode else None,
+                reply_to_message_id=getattr(message, "message_id", None),
+                message_thread_id=getattr(message, "message_thread_id", None),
+            )
+            thinking_msg_id = getattr(sent, "message_id", None)
+        except Exception as send_err:
+            logger.debug("[%s] Could not send thinking indicator: %s", self.name, send_err)
+
+        try:
+            response_text = await self._call_mavis_session(prompt)
+        except Exception as relay_err:
+            logger.warning("[%s] Mavis relay failed: %s — falling through to Hermes", self.name, relay_err)
+            if thinking_msg_id is not None:
+                try:
+                    await self._bot.delete_message(chat_id=chat_id, message_id=thinking_msg_id)
+                except Exception:
+                    pass
+            event = self._build_message_event(message, MessageType.TEXT)
+            event.text = prompt
+            self._enqueue_text_event(event)
+            return
+
+        # Delete the thinking indicator
+        if thinking_msg_id is not None:
+            try:
+                await self._bot.delete_message(chat_id=chat_id, message_id=thinking_msg_id)
+            except Exception:
+                pass
+
+        # Escape and send the response
+        escaped = _escape_mdv2(response_text) if response_text else "_no response_"
+        try:
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text=escaped,
+                parse_mode=ParseMode.MARKDOWN_V2 if ParseMode else None,
+                reply_to_message_id=getattr(message, "message_id", None),
+                message_thread_id=getattr(message, "message_thread_id", None),
+            )
+        except Exception as send_err:
+            logger.warning("[%s] MarkdownV2 send failed, retrying plain: %s", self.name, send_err)
+            try:
+                await self._bot.send_message(
+                    chat_id=chat_id,
+                    text=response_text or "_no response_",
+                    reply_to_message_id=getattr(message, "message_id", None),
+                    message_thread_id=getattr(message, "message_thread_id", None),
+                )
+            except Exception as fallback_err:
+                logger.error("[%s] Mavis response send failed: %s", self.name, fallback_err)
+
+    async def _call_mavis_session(self, prompt: str) -> str:
+        """
+        Relay a prompt to Andre's Mavis session via mavis communication send,
+        then poll for the session reply using a correlation marker.
+
+        Falls back to raising on timeout.
+        """
+        marker = f"swb:{_uuid.uuid4().hex[:12]}"
+        parent_sid = os.environ.get("__MAVIS_PARENT_SESSION_ID", "")
+
+        # Step 1: deliver the prompt with correlation marker
+        send_cmd = [
+            "mavis", "communication", "send",
+            "--to", _MAVIS_SESSION_ID,
+            "--command", "prompt",
+            "--content", f"[SWITCHBOARD marker={marker}] {prompt}",
+        ]
+        try:
+            r = subprocess.run(
+                send_cmd,
+                capture_output=True, text=True, timeout=15,
+                env={**os.environ, "HOME": os.environ.get("HOME", "")}
+            )
+            if r.returncode != 0:
+                raise RuntimeError(f"mavis send failed: {r.stderr.strip()[:200]}")
+            out = r.stdout.strip()
+            try:
+                msg_data = json.loads(out)
+                msg_id = msg_data.get("messageId") or msg_data.get("data", {}).get("messageId")
+            except Exception:
+                msg_id = None
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("mavis send timed out")
+        except Exception as e:
+            raise RuntimeError(f"mavis send error: {e}") from e
+
+        # Step 2: poll for the session reply
+        poll_cmd_base = [
+            "mavis", "communication", "messages",
+            "--to", parent_sid,
+            "--limit", "20",
+        ]
+        deadline = time.time() + _MAVIS_RELAY_TIMEOUT
+        poll_interval = 1.5
+
+        while time.time() < deadline:
+            await asyncio.sleep(poll_interval)
+            try:
+                poll_cmd = poll_cmd_base + ["--status", "done"]
+                r = subprocess.run(
+                    poll_cmd,
+                    capture_output=True, text=True, timeout=10,
+                    env={**os.environ, "HOME": os.environ.get("HOME", "")}
+                )
+                if r.returncode != 0:
+                    continue
+                try:
+                    data = json.loads(r.stdout)
+                except Exception:
+                    continue
+                msgs = data.get("messages", [])
+                for msg in reversed(msgs):  # newest first
+                    content = msg.get("content", "")
+                    if marker in content:
+                        return content.split(marker, 1)[1].strip()
+            except subprocess.TimeoutExpired:
+                continue
+            except Exception:
+                continue
+
+        raise RuntimeError(f"Mavis session did not respond within {_MAVIS_RELAY_TIMEOUT}s")
+
     async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle incoming command messages."""
         if not update.message or not update.message.text:
             return
         if not self._should_process_message(update.message, is_command=True):
             return
-        
+
         event = self._build_message_event(update.message, MessageType.COMMAND, update_id=update.update_id)
         await self.handle_message(event)
 

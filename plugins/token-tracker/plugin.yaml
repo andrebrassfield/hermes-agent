@@ -1,0 +1,11 @@
+name: token-tracker
+version: "1.0.0"
+description: "Mavis context observability plugin — instruments per-turn token allocation, context growth rate, and tool output bloat. Data flows into ~/.mavis/context/token-tracker.db. Activate via `hermes plugins enable token-tracker` or the plugins UI."
+author: Mavis (Andre Brassfield fleet)
+hooks:
+  - pre_api_request
+  - post_api_request
+  - pre_llm_call
+  - post_llm_call
+  - pre_tool_call
+  - post_tool_call

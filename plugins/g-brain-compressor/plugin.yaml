@@ -1,0 +1,7 @@
+name: g-brain-compressor
+version: "1.0.0"
+description: "Just-In-Time (JIT) tool bloat reducer. Archives massive tool payloads to disk to prevent context window exhaustion. Activates when tool results exceed TOKEN_BUDGET_THRESHOLD (default 5,000 tokens)."
+author: "Mavis Architecture Team"
+hooks:
+  - pre_api_request
+  - post_api_request

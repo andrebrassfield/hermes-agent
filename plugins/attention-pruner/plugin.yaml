@@ -1,0 +1,6 @@
+name: attention-pruner
+version: "1.0.0"
+description: "Dynamic \"lost in the middle\" eviction engine. Runs after g-brain-compressor to prune conversational/reasoning turns from the evictable middle, preserving system prompt, recency buffer, tool pairs, and decision nodes. Archives evicted batches to gzip with rolling summaries."
+author: "Mavis Architecture Team"
+hooks:
+  - pre_api_request

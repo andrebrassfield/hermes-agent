@@ -1050,6 +1050,7 @@ def connect(
             apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
             conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=5000")  # Cooperative retry: 5s wait before lock failure
             needs_init = resolved not in _INITIALIZED_PATHS
             if needs_init:
                 # Idempotent: runs CREATE TABLE IF NOT EXISTS + the additive

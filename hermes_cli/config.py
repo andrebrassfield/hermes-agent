@@ -1681,6 +1681,22 @@ DEFAULT_CONFIG = {
         # disable backups entirely, set ``pre_update_backup: false`` above
         # rather than ``backup_keep: 0``.
         "backup_keep": 5,
+        # Auto-validation harness: run a 3-gate staging check (syntax, mock
+        # conversation, config schema) after every successful git pull, before
+        # the update is marked complete. Any gate failure triggers auto-rollback.
+        # Default: True. Set to False to disable entirely, or pass --no-validate
+        # on the command line for a one-shot skip.
+        "auto_validate": True,
+        # Which gates to run. Valid values: syntax, conversation, config.
+        # Default: all three. Useful for debugging a specific gate.
+        "validate_gates": ["syntax", "conversation", "config"],
+        # Timeout in seconds for gate 2 (mock conversation run). Default: 120.
+        # If the conversation loop does not exit within this time, the gate
+        # is marked as failed and rollback is triggered.
+        "validate_timeout": 120,
+        # Path to the staging clone used for validation.
+        # Default: ~/.hermes/hermes-agent-staging
+        "staging_root": str(Path.home() / ".hermes" / "hermes-agent-staging"),
     },
 
     # Language Server Protocol — semantic diagnostics from real

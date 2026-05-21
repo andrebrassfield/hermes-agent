@@ -6119,6 +6119,85 @@ def _validate_critical_files_syntax(root) -> tuple[bool, str | None, str | None]
     return True, None, None
 
 
+def _run_auto_validation(args, pre_pull_sha: str, update_succeeded: bool) -> None:
+    """
+    Run the 3-gate auto-validation harness after a successful git pull.
+
+    Called from _cmd_update_impl() after the syntax guard and before the bytecode
+    cache clear. On any gate failure, triggers rollback to pre_pull_sha and exits.
+
+    Respects ``updates.auto_validate: false`` in config and ``--no-validate`` CLI flag.
+    Skips with warning if staging clone is unavailable (never blocks the update).
+    """
+    import shutil as _shutil
+    import time as _time
+
+    # Check if auto-validation is disabled via flag or config
+    if getattr(args, "no_validate", False):
+        return
+
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+    except Exception:
+        cfg = {}
+
+    updates_cfg = cfg.get("updates", {}) if isinstance(cfg, dict) else {}
+    if not updates_cfg.get("auto_validate", True):
+        return
+
+    validate_timeout = updates_cfg.get("validate_timeout", 120)
+
+    # Lazily import to avoid import cost when auto-validation is off
+    try:
+        from hermes_cli.update_validation import run_validation_from_pull
+    except Exception as exc:
+        logger.debug("Could not import update_validation: %s", exc)
+        return
+
+    staging_root = Path.home() / ".hermes" / "hermes-agent-staging"
+    HERMES_PRODUCTION_ROOT = Path.home() / ".hermes" / "hermes-agent"
+
+    print()
+    print("→ Running auto-validation (3-gate staging harness)...")
+
+    start = _time.monotonic()
+    ok, failing_gate, err = run_validation_from_pull(
+        pre_pull_sha=pre_pull_sha,
+        config=updates_cfg if isinstance(updates_cfg, dict) else None,
+        timeout=validate_timeout,
+    )
+    elapsed = _time.monotonic() - start
+
+    if ok:
+        print(f"  ✓ All gates passed ({elapsed:.1f}s total)")
+        return
+
+    # Gate failed — trigger rollback
+    print()
+    print(f"✗ Auto-validation failed at gate '{failing_gate}':")
+    print(f"  {err}")
+    print()
+    print(f"→ Rolling back to {pre_pull_sha[:10]}...")
+
+    git_cmd = ["git"]
+    rollback_result = subprocess.run(
+        git_cmd + ["reset", "--hard", pre_pull_sha],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if rollback_result.returncode == 0:
+        print("  ✓ Rollback complete — your install is unchanged.")
+        print("  Try ``hermes update`` again later once the upstream issue is fixed.")
+    else:
+        print("  ✗ Rollback failed. Recover manually with:")
+        print(f"    cd {PROJECT_ROOT} && git reset --hard {pre_pull_sha}")
+        if rollback_result.stderr.strip():
+            print(f"    ({rollback_result.stderr.strip().splitlines()[0]})")
+    sys.exit(1)
+
+
 def _gateway_prompt(prompt_text: str, default: str = "", timeout: float = 300.0) -> str:
     """File-based IPC prompt for gateway mode.
 
@@ -8655,6 +8734,14 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 sys.exit(1)
 
             update_succeeded = True
+
+            # ── Auto-Validation Gate ─────────────────────────────────────────────
+            # Run 3-gate staging harness on the pulled code before declaring the
+            # update complete. Any gate failure triggers auto-rollback so the user
+            # never ends up with a broken Hermes install.
+            _run_auto_validation(args, pre_pull_sha, update_succeeded)
+            # ─────────────────────────────────────────────────────────────────────
+
         finally:
             if auto_stash_ref is not None:
                 # Don't attempt stash restore if the code update itself failed —
@@ -12852,6 +12939,12 @@ Examples:
         action="store_true",
         default=False,
         help="Windows: proceed with the update even when another hermes.exe is detected. The concurrent process will likely cause WinError 32 warnings and may leave a reboot-deferred .exe replacement.",
+    )
+    update_parser.add_argument(
+        "--no-validate",
+        action="store_true",
+        default=False,
+        help="Skip the 3-gate auto-validation harness (syntax, conversation, config). Use when you want a fast update or when staging is unavailable.",
     )
     update_parser.set_defaults(func=cmd_update)
 

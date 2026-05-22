@@ -1291,7 +1291,12 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     
     # Telegram
     telegram_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if telegram_token:
+    hermes_telegram_enabled = os.getenv("HERMES_TELEGRAM_ENABLED", "").lower()
+    if hermes_telegram_enabled == "false":
+        # Explicit opt-out via env var — disable Telegram completely
+        if Platform.TELEGRAM in config.platforms:
+            config.platforms[Platform.TELEGRAM].enabled = False
+    elif telegram_token:
         if Platform.TELEGRAM not in config.platforms:
             config.platforms[Platform.TELEGRAM] = PlatformConfig()
         config.platforms[Platform.TELEGRAM].enabled = True

@@ -1018,7 +1018,11 @@ def _get_env_config() -> Dict[str, Any]:
     # remote home, Vercel uses its documented workspace root, and everything
     # else starts in the backend's default root-like cwd.
     if env_type == "local":
-        default_cwd = os.getcwd()
+        try:
+            default_cwd = os.getcwd()
+        except FileNotFoundError:
+            # CWD was deleted (e.g. hermes worker workspace removed) — fall back to home
+            default_cwd = os.path.expanduser("~")
     elif env_type == "ssh":
         default_cwd = "~"
     elif env_type == "vercel_sandbox":

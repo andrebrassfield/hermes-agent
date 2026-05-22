@@ -134,6 +134,177 @@ SILENT_MARKER = "[SILENT]"
 # Backward-compatible module override used by tests and emergency monkeypatches.
 _hermes_home: Path | None = None
 
+# =============================================================================
+# Telegram Delivery Circuit Breaker
+# =============================================================================
+# After N consecutive Telegram delivery failures for a job, the scheduler
+# pauses the job, creates a kanban task for the executive-orchestrator, and
+# logs to mavis-audit.jsonl.  Prevents silent accumulation of Telegram delivery
+# errors and ensures the operator knows about broken connectivity.
+_TELEGRAM_FAILURE_THRESHOLD: int = 3
+_TELEGRAM_FAILURE_FIELD: str = "telegram_delivery_failures"
+
+
+def _is_telegram_delivery_error(error: str) -> bool:
+    """Check if a delivery error string relates to Telegram transport."""
+    lower = error.lower()
+    return "telegram" in lower or "chat not found" in lower
+
+
+def _log_mavis_audit_entry(entry: dict) -> None:
+    """Append a JSON line to the mavis audit log at ~/.hermes/mavis-audit.jsonl."""
+    import json
+    audit_path = _get_hermes_home() / "mavis-audit.jsonl"
+    try:
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        logger.warning("Failed to write mavis-audit entry: %s", e)
+
+
+def _circuit_breaker_trip(job_id: str, job_name: str, error: str) -> None:
+    """Trip the Telegram delivery circuit breaker for a job.
+
+    Pauses the job, creates a kanban task for the executive-orchestrator,
+    and logs to mavis-audit.jsonl.
+    """
+    from cron.jobs import pause_job, update_job
+    import sqlite3
+    import json
+    import uuid
+    import datetime
+    import time
+
+    # 1. Pause the job
+    pause_job(job_id, reason="Telegram delivery circuit breaker tripped after 3 consecutive failures")
+    logger.warning(
+        "Telegram circuit breaker: paused job '%s' (%s)",
+        job_name, job_id,
+    )
+
+    # 2. Create a kanban task for the executive-orchestrator
+    kanban_db = _get_hermes_home() / "kanban.db"
+    task_id = f"t_{uuid.uuid4().hex[:8]}"
+    now_int = int(time.time())
+    task_created = False
+
+    try:
+        conn = sqlite3.connect(str(kanban_db))
+        conn.execute(
+            "INSERT INTO tasks (id, title, body, assignee, status, priority, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                task_id,
+                f"Telegram delivery broken: {job_name}",
+                (
+                    f"## Telegram Delivery Circuit Breaker\n\n"
+                    f"**Job:** {job_name}\n"
+                    f"**Job ID:** `{job_id}`\n"
+                    f"**Error:** {error}\n\n"
+                    f"The Telegram delivery circuit breaker tripped after 3 consecutive "
+                    f"failures for this job. The job has been automatically paused.\n\n"
+                    f"### Actions needed\n"
+                    f"1. Investigate Telegram delivery connectivity\n"
+                    f"2. Fix the root cause\n"
+                    f"3. Resume the job with `cronjob action=resume` or `hermes cron resume {job_name}`\n"
+                ),
+                "executive-orchestrator",
+                "ready",
+                80,
+                "backend-engineer",
+                now_int,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        task_created = True
+    except Exception as e:
+        logger.error("Failed to create kanban task for circuit breaker: %s", e)
+
+    # 3. Log to mavis-audit.jsonl
+    _log_mavis_audit_entry({
+        "event": "telegram_circuit_breaker",
+        "timestamp": datetime.datetime.now().isoformat(),
+        "job_id": job_id,
+        "job_name": job_name,
+        "error": error,
+        "action": "paused",
+        "kanban_task_id": task_id if task_created else None,
+    })
+
+    logger.warning(
+        "Telegram circuit breaker tripped for job '%s' (%s) — paused, kanban task %s",
+        job_name, job_id, task_id if task_created else "FAILED",
+    )
+
+
+def _reset_telegram_failures(job: dict) -> None:
+    """Reset the Telegram failure counter when delivery succeeds."""
+    job_id = job["id"]
+    current = job.get(_TELEGRAM_FAILURE_FIELD, 0) or 0
+    if current > 0:
+        from cron.jobs import update_job
+        try:
+            update_job(job_id, {_TELEGRAM_FAILURE_FIELD: 0})
+            logger.info(
+                "Job '%s': Telegram failure counter reset (delivery succeeded)",
+                job.get("name", job_id),
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to reset telegram_failures for job %s: %s", job_id, e,
+            )
+
+
+def _track_telegram_delivery_outcome(job: dict, delivery_error: Optional[str]) -> None:
+    """Track Telegram delivery outcome — increment or reset failure counter.
+
+    Called after _deliver_result returns, inside _process_job.
+    Checks whether the job delivers to Telegram, then either increments
+    the failure counter (on error) or resets it (on success). Trips the
+    circuit breaker when the threshold is reached.
+    """
+    # Only track jobs that deliver to Telegram
+    targets = _resolve_delivery_targets(job)
+    delivers_to_telegram = any(
+        t.get("platform", "").lower() == "telegram" for t in targets
+    )
+    if not delivers_to_telegram:
+        return
+
+    if delivery_error and _is_telegram_delivery_error(delivery_error):
+        job_id = job["id"]
+        current_failures = job.get(_TELEGRAM_FAILURE_FIELD, 0) or 0
+        current_failures += 1
+
+        from cron.jobs import update_job
+        try:
+            update_job(job_id, {_TELEGRAM_FAILURE_FIELD: current_failures})
+        except Exception as e:
+            logger.warning(
+                "Failed to persist telegram_failures for job %s: %s", job_id, e,
+            )
+
+        logger.warning(
+            "Job '%s': Telegram delivery failure %d/%d: %s",
+            job.get("name", job_id),
+            current_failures,
+            _TELEGRAM_FAILURE_THRESHOLD,
+            delivery_error,
+        )
+
+        if current_failures >= _TELEGRAM_FAILURE_THRESHOLD:
+            _circuit_breaker_trip(job_id, job.get("name", job_id), delivery_error)
+            # Reset counter after tripping so it doesn't re-trigger on stale data
+            try:
+                update_job(job_id, {_TELEGRAM_FAILURE_FIELD: 0})
+            except Exception:
+                pass
+    else:
+        _reset_telegram_failures(job)
+
+
 
 def _get_hermes_home() -> Path:
     """Resolve Hermes home dynamically while preserving test monkeypatch hooks."""
@@ -1886,6 +2057,12 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     except Exception as de:
                         delivery_error = str(de)
                         logger.error("Delivery failed for job %s: %s", job["id"], de)
+
+                # --- Telegram Delivery Circuit Breaker ---
+                # Track Telegram delivery failures and trip the circuit breaker
+                # after N consecutive failures (pause job, create kanban task, log).
+                _track_telegram_delivery_outcome(job, delivery_error)
+                # --- End Circuit Breaker ---
 
                 # Treat empty final_response as a soft failure so last_status
                 # is not "ok" — the agent ran but produced nothing useful.

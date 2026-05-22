@@ -5303,15 +5303,11 @@ def _default_spawn(
     # back to Path.home() / ".hermes" (the DEFAULT profile root), ignoring the
     # profile-specific config entirely.  Fixes profile-scoped fallback_providers
     # being invisible to kanban workers.
-    from hermes_cli.profiles import resolve_profile_env
-    try:
-        env["HERMES_HOME"] = resolve_profile_env(profile_arg)
-    except FileNotFoundError:
-        # Profile dir doesn't exist — defer resolution to the CLI's
-        # _apply_profile_override() via HERMES_PROFILE (set below).
-        # This only happens in test fixtures where the isolated
-        # HERMES_HOME never had profiles created.
-        pass
+    # Kanban DB lives at <root>/kanban.db where <root> is the Hermes root
+    # (NOT the profile-scoped path). Setting HERMES_HOME to the root ensures
+    # workers open the canonical kanban.db even when spawned with a profile.
+    # HERMES_PROFILE is still set so the worker loads the right profile config.
+    env["HERMES_HOME"] = str(Path.home() / ".hermes")
     if task.tenant:
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id

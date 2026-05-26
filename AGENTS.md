@@ -4,6 +4,150 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 ## Development Environment
 
+## Project Gibson Overlay
+
+Canonical vault: `/Users/brassfieldventuresllc/vault`
+
+Default cognition path:
+
+- Primary: Hermes MEMORY.md + USER.md
+- Fallback: session_search (SQLite FTS5)
+- Cross-session memory: Honcho provider (when configured)
+- Vault sync: ~/.gibson/vault → git push to andrebrassfield/gibson-vault.git
+- Do NOT use gbrain — it has been deprecated in V4 architecture
+
+Read before autonomous work:
+
+- `/Users/brassfieldventuresllc/vault/Shared/MemoryRules/Gibson-Memory-Contract.md`
+- `/Users/brassfieldventuresllc/vault/Shared/Runtime/Gibson-Runtime-Contract.md`
+- `/Users/brassfieldventuresllc/vault/Agents/Protocols/AGENT-BOOT-SEQUENCE.md`
+
+Hard stops:
+
+- No deploys, pushes, database migrations, external sends/posts, credential changes, schedule changes, destructive file operations, or memory purges without explicit in-session approval.
+
+Every autonomous run should produce a run receipt using:
+
+- `/Users/brassfieldventuresllc/vault/Shared/Schemas/gibson-run-receipt.yaml`
+
+---
+
+## Fleet Hierarchy — Gibson Model
+
+Inspired by William Gibson's *Neuromancer*. Mavis sits above Hermes and OpenClaw as the top orchestrator.
+
+```
+Andre (Human in the Loop)
+    │
+    ├── MAVIS ── top orchestrator ── MiniMax Agent root session
+    │           Coordinates, decides, routes all requests
+    │           Always active, owns the fleet's decisions
+    │
+    ├── NEUROMANCER ── Hermes (action layer)
+    │                   Responsible for: research, coding, content creation
+    │                   Dispatcher: kanban state machine
+    │                   Workers: lead-architect, backend-engineer, qa-auditor,
+    │                            content-researcher, text-producer, visual-producer
+    │
+    ├── WINTERMUTE ── OpenClaw (always-on daemon)
+    │                  Responsible for: monitoring, Telegram, scheduled tasks
+    │                  Polls bot7960150906 on port 18789
+    │
+    └── VAULT ── Gibson knowledge and skills
+                   Git repo: andrebrassfield/gibson-vault.git
+                   Synced via ~/.gibson/vault every 15 min via cron
+                   NOT gbrain — V4 uses native Hermes memory only
+```
+
+**Role of Goose:** Goose agent (installed at `~/.local/bin/goose`, v1.29.1+) serves as the execution sub-agent — receives delegation from Hermes and performs file operations, migrations, and vault maintenance. Can run as ACP agent for structured inter-agent communication.
+
+**Layer constraints:**
+- Mavis decides → Hermes executes → OpenClaw monitors
+- No agent acts without routing through the appropriate layer
+- Hermes cannot execute directly — must use kanban state machine for delegation
+- OpenClaw owns Telegram polling — no other agent polls the same bot token
+
+---
+
+## Fleet Profile Structure
+
+11 profiles in 4 departments. Restructured 2026-05-18.
+
+### Management (Orchestrators)
+`macro-orchestrator` | `eng-orchestrator` | `content-orchestrator`
+
+**Constraints:** `disabled_toolsets: [terminal, file, browser, code_execution, delegation, image_gen, tts, computer_use, web, messaging, skills, spotify, todo, vision, session_search, clarify, cronjob, browser-use, lsp, hermes-cli]`
+- Kanban-only delegation — cannot execute directly
+- Must use kanban state machine to delegate work
+- `delegation.orchestrator_enabled = true` | `max_spawn_depth = 2` | `max_concurrent_children = 3`
+
+### Landscape & Macro
+`stock-monitor` | `landscape-monitor`
+
+**Toolset:** web, browser, memory, vision — no terminal/file access
+
+### Code & Engineering
+`lead-architect` | `backend-engineer` | `qa-auditor`
+
+**Toolset:** terminal, file, code_execution — no web/image_gen
+
+### Content & Research
+`content-researcher` | `text-producer` | `visual-producer`
+
+**Toolset:** memory, web, vision, image_gen — no terminal/browser
+
+---
+
+## Kanban Database
+
+**Path:** `~/.hermes/kanban.db`
+**Critical schema rules:**
+- Field is `body`, NOT `description`
+- Field is `kind`, NOT `event_type`
+- Timestamps are INTEGER (Unix seconds for tasks, ms for events)
+- NO `updated_at` column — it does not exist
+
+**Schema:**
+```sql
+CREATE TABLE tasks (
+  id TEXT PRIMARY KEY,
+  body TEXT NOT NULL,           -- NOT description
+  status TEXT NOT NULL,        -- todo | triage | ready | in_progress | done | rejected
+  kind TEXT NOT NULL,          -- NOT event_type
+  created_at INTEGER NOT NULL,  -- Unix seconds
+  assignee TEXT
+);
+CREATE TABLE task_runs (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  profile_name TEXT,
+  started_at INTEGER,           -- Unix seconds
+  ended_at INTEGER,
+  outcome TEXT
+);
+CREATE TABLE task_events (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  kind TEXT NOT NULL,          -- NOT event_type
+  created_at INTEGER NOT NULL,  -- Unix milliseconds
+  profile_name TEXT,
+  body TEXT
+);
+```
+
+**Task lifecycle:** `triage` → `ready` → `in_progress` → `done` (or `rejected`)
+Orchestrators create child tasks and use `ready` state to signal workers to pick up work.
+
+---
+
+## Supabase Fleet Sync
+
+**Project:** `xfqlxujtaticrsbcasai`
+**Tables:** `fleet_profiles_prod` | `fleet_profiles_test`
+
+**Sync script:** `~/.hermes/scripts/supabase-sync.py`
+**Launchd cron:** `~/Library/LaunchAgents/com.hermes.fleet-sync.plist` (15-min interval)
+**Run manually:**
 ```bash
 # Prefer .venv; fall back to venv if that's what your checkout has.
 source .venv/bin/activate   # or: source venv/bin/activate
@@ -262,49 +406,19 @@ The dashboard embeds the real `hermes --tui` — **not** a rewrite.  See `hermes
 
 ## Adding New Tools
 
-For most custom or local-only tools, do **not** edit Hermes core. Use the plugin
-route instead: create `~/.hermes/plugins/<name>/plugin.yaml` and
-`~/.hermes/plugins/<name>/__init__.py`, then register tools with
-`ctx.register_tool(...)`. Plugin toolsets are discovered automatically and can be
-enabled or disabled without touching `tools/` or `toolsets.py`.
+| Path | Purpose |
+|------|---------|
+| `~/.hermes/hermes-agent/` | Hermes main repo (v2026.5.16) |
+| `~/.hermes/kanban.db` | Kanban SQLite DB |
+| `~/.hermes/plugins/` | Hermes plugins (Fleet Ops at `agent-fleet/`) |
+| `~/.hermes/profiles/` | Fleet profile configs |
+| `~/.hermes/scripts/` | Sync and maintenance scripts |
+| `~/.gibson/vault/` | Gibson git vault (synced to andrebrassfield/gibson-vault.git) |
+| `~/.ssh/id_ed25519` | Git SSH deploy key |
+| `~/.openclaw/openclaw.json` | OpenClaw config (Telegram bot token) |
+| `/Users/brassfieldventuresllc/Documents/Obsidian Vault/` | Human UI — task results, skill drafts, Command Center |
 
-Use the built-in route below only when the user is explicitly contributing a new
-core Hermes tool that should ship in the base system.
-
-Built-in/core tools require changes in **2 files**:
-
-**1. Create `tools/your_tool.py`:**
-```python
-import json, os
-from tools.registry import registry
-
-def check_requirements() -> bool:
-    return bool(os.getenv("EXAMPLE_API_KEY"))
-
-def example_tool(param: str, task_id: str = None) -> str:
-    return json.dumps({"success": True, "data": "..."})
-
-registry.register(
-    name="example_tool",
-    toolset="example",
-    schema={"name": "example_tool", "description": "...", "parameters": {...}},
-    handler=lambda args, **kw: example_tool(param=args.get("param", ""), task_id=kw.get("task_id")),
-    check_fn=check_requirements,
-    requires_env=["EXAMPLE_API_KEY"],
-)
-```
-
-**2. Add to `toolsets.py`** — either `_HERMES_CORE_TOOLS` (all platforms) or a new toolset. **This step is required:** auto-discovery imports the tool and registers its schema, but the tool is only *exposed to an agent* if its name appears in a toolset. `_HERMES_CORE_TOOLS` is not dead code — it's the default bundle every platform's base toolset inherits from.
-
-Auto-discovery: any `tools/*.py` file with a top-level `registry.register()` call is imported automatically — no manual import list to maintain. Wiring into a toolset is still a deliberate, manual step.
-
-The registry handles schema collection, dispatch, availability checking, and error wrapping. All handlers MUST return a JSON string.
-
-**Path references in tool schemas**: If the schema description mentions file paths (e.g. default output directories), use `display_hermes_home()` to make them profile-aware. The schema is generated at import time, which is after `_apply_profile_override()` sets `HERMES_HOME`.
-
-**State files**: If a tool stores persistent state (caches, logs, checkpoints), use `get_hermes_home()` for the base directory — never `Path.home() / ".hermes"`. This ensures each profile gets its own state.
-
-**Agent-level tools** (todo, memory): intercepted by `run_agent.py` before `handle_function_call()`. See `tools/todo_tool.py` for the pattern.
+**Obsidian Vault Write Protocol:** After completing significant tasks, write a brief summary to `02_Hermes_Workers/Completed_Tasks/<task_id>.md`. Use `> [!tip]` callouts and `[[wikilinks]]`. Homepage is `Command-Center.md`.
 
 ---
 

@@ -1,77 +1,88 @@
-.DS_Store
-/venv/
-/_pycache/
-*.pyc*
-__pycache__/
-.venv/
-.vscode/
+# === Secrets & Credentials ===
 .env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-.env.development
-.env.test
-export*
-__pycache__/model_tools.cpython-310.pyc
-__pycache__/web_tools.cpython-310.pyc
-logs/
-data/
-.pytest_cache/
-test_durations.json
-.pytest-cache/
-tmp/
-temp_vision_images/
-hermes-*/*
-examples/
-tests/quick_test_dataset.jsonl
-tests/sample_dataset.jsonl
-run_datagen_kimik2-thinking.sh
-run_datagen_megascience_glm4-6.sh
-run_datagen_sonnet.sh
-source-data/*
-run_datagen_megascience_glm4-6.sh
-data/*
+.env.bak
+auth.json
+channel_directory.json
+context_length_cache.yaml
+
+# === Local Runtime State ===
+.hermes_history
+.restart_last_processed.json
+.skills_prompt_snapshot.json
+.update_check
+.update_exit_code
+gateway.lock
+gateway.pid
+gateway_state.json
+cron/.active_regime.json
+
+# === Kanban DB ===
+kanban.db
+kanban.db-shm
+kanban.db-wal
+
+# === Kanban Workspaces (all temp/eval dirs) ===
+kanban/workspaces/.trash-*/
+kanban/workspaces/.eval-*/
+kanban/workspaces/.cdp-*/
+kanban/workspaces/.oe-*/
+kanban/workspaces/.gepa-*/
+kanban/workspaces/t_*/
+kanban/workspaces/cdp-*/
+kanban/workspaces/gepa-*/
+kanban/workspaces/eval-*/
+
+# === Logs ===
+logs/*.log
+logs/*.log.*
+logs/*.err
+fleet-dashboard.log
+
+# === Build Output ===
+fleet/.next/
+fleet/node_modules/
+pipeline/
+backups/
+
+# === Session History ===
+sessions/
+
+# === LSP Cache ===
+.lsp/
+lsp/node_modules/
+
+# === Node_modules ===
 node_modules/
-browser-use/
-agent-browser/
-# Private keys
-*.ppk
-*.pem
-privvy*
-images/
+*/node_modules/
+
+# === Python Cache ===
 __pycache__/
-hermes_agent.egg-info/
-wandb/
-testlogs
+*.pyc
+*.pyo
+.env.local
 
-# CLI config (may contain sensitive SSH paths)
-cli-config.yaml
+# === macOS ===
+.DS_Store
+.AppleDouble
+.LSOverride
 
-# Skills Hub state (lives in ~/.hermes/skills/.hub/ at runtime, but just in case)
-skills/.hub/
-ignored/
-.worktrees/
-environments/benchmarks/evals/
+# === Editor ===
+.vscode/
+.idea/
+*.swp
+*.swo
 
-# Web UI build output
-hermes_cli/web_dist/
+# === Lockfiles ===
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+Gemfile.lock
 
-# Web UI assets — synced from @nous-research/ui at build time via
-# `npm run sync-assets` (see web/package.json).
-web/public/fonts/
-web/public/ds-assets/
+# === Curator Backups ===
+.curator_backups/
+.skills_backup/
+skills/.curator_backups/
+profiles/*/skills/.curator_backups/
 
-# Release script temp files
-.release_notes.md
-mini-swe-agent/
-
-# Nix
-.direnv/
-.nix-stamps/
-result
-website/static/api/skills-index.json
-models-dev-upstream/
-hermes_cli/tui_dist/*
-hermes_cli/scripts/
-docs/superpowers/*
+# === Keep ===
+!.gitkeep

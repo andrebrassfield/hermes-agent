@@ -44,7 +44,7 @@ def main():
 
     # Load jobs.json
     try:
-        with open(JOBS_JSON) as f:
+        with open(JOBS_JSON, encoding="utf-8") as f:
             raw = json.load(f)
         jobs = raw if isinstance(raw, list) else raw.get("jobs", [])
     except Exception as e:
@@ -151,7 +151,7 @@ def main():
     # Heartbeat
     try:
         if HEARTBEAT.exists():
-            last_hb = HEARTBEAT.read_text().strip().split("\n")[-1][:16]
+            last_hb = HEARTBEAT.read_text(encoding="utf-8").strip().split("\n")[-1][:16]
             from time import mktime
             import subprocess
             hr = subprocess.run(["date", "-j", "-f", "%Y-%m-%d %H:%M", last_hb, "+%s"],

@@ -197,7 +197,7 @@ class TwentyDB:
 _auth_key = os.environ.get("TWENTY_API_KEY", "")
 if not _auth_key:
     try:
-        with open(HOME + "/.hermes/auth.json") as f:
+        with open(HOME + "/.hermes/auth.json", encoding="utf-8") as f:
             auth_data = json.load(f)
         _auth_key = auth_data.get("twenty_api_key", "")
     except Exception:

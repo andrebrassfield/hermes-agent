@@ -567,18 +567,42 @@ def bridge_lead_to_twenty(kanban_task_id: str, dry_run: bool = False,
             )
             person_id = p["id"]
 
-    # opportunity
+    # opportunity — with Postgres dedup (fast, no API needed)
     opp_name = (lead["contact_name"] + " — " + lead["company"]) if lead.get("company") else lead["contact_name"]
     opp_id   = None
     metadata = json.loads(lead.get("metadata") or "{}")
     existing_opp_id = metadata.get("twenty_opportunity_id")
 
     if existing_opp_id:
+        # Already bridged — update stage if changed
         if not dry_run:
             rest.update_opportunity(existing_opp_id, stage=twenty_stage)
         opp_id = existing_opp_id
     else:
-        if not dry_run:
+        # Dedup: check Postgres for existing opportunity with same name + company
+        # (handles re-scraped leads from OpenClaw before they hit crm.db)
+        dedup_found = False
+        if _PG_AVAILABLE and lead.get("company"):
+            try:
+                pg_dedup = TwentyDB()
+                dup_rows = pg_dedup._q(
+                    'SELECT "id","stage" FROM "{schema}"."opportunity" '
+                    'WHERE "deletedAt" IS NULL AND LOWER("name") = LOWER(%s) '
+                    'AND "companyId" = %s LIMIT 1',
+                    (opp_name, company_id))
+                if dup_rows:
+                    dup_id, dup_stage = dup_rows[0]
+                    opp_id = dup_id
+                    # If stage changed (e.g., moved from SCREENING → MEETING), patch it
+                    if dup_stage != twenty_stage and not dry_run:
+                        rest.update_opportunity(dup_id, stage=twenty_stage)
+                    dedup_found = True
+                    if not dry_run:
+                        print(f"  [dedup] reused existing opportunity {dup_id} (stage {dup_stage} → {twenty_stage})")
+            except Exception as e:
+                print(f"  [dedup] check failed: {e} — proceeding to create", file=sys.stderr)
+
+        if not dedup_found and not dry_run:
             opp = rest.create_opportunity(
                 name=opp_name,
                 stage=twenty_stage,
@@ -587,7 +611,7 @@ def bridge_lead_to_twenty(kanban_task_id: str, dry_run: bool = False,
                 person_id=person_id,
             )
             opp_id = opp["id"]
-        else:
+        elif not dedup_found:
             opp_id = "<would-create>"
 
     # write Twenty IDs back to crm.db

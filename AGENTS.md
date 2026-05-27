@@ -111,11 +111,22 @@ Andre (Human in the Loop)
 ```sql
 CREATE TABLE tasks (
   id TEXT PRIMARY KEY,
-  body TEXT NOT NULL,           -- NOT description
-  status TEXT NOT NULL,        -- todo | triage | ready | in_progress | done | rejected
-  kind TEXT NOT NULL,          -- NOT event_type
-  created_at INTEGER NOT NULL,  -- Unix seconds
-  assignee TEXT
+  title TEXT NOT NULL,        -- display name for the task
+  body TEXT,                  -- full context/payload (often JSON)
+  assignee TEXT,
+  status TEXT NOT NULL,       -- triage | todo | ready | in_progress | done | rejected
+  kind TEXT NOT NULL DEFAULT '',
+  priority INTEGER DEFAULT 0,
+  created_at INTEGER NOT NULL, -- Unix seconds
+  started_at INTEGER,
+  completed_at INTEGER,
+  workspace_kind TEXT NOT NULL DEFAULT 'scratch',
+  workspace_path TEXT,
+  tenant TEXT,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  last_failure_error TEXT,
+  worker_pid INTEGER,
+  session_id TEXT
 );
 CREATE TABLE task_runs (
   id TEXT PRIMARY KEY,

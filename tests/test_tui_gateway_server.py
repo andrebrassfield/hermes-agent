@@ -3581,6 +3581,90 @@ def test_respond_unpacks_sid_tuple_correctly():
 
 
 # ---------------------------------------------------------------------------
+# Blocking prompts wait for the human (v6 north-star #5): _block with
+# timeout=None must never expire — interrupt/shutdown (_clear_pending)
+# are the only releases.
+# ---------------------------------------------------------------------------
+
+
+def _run_block_in_thread(monkeypatch, sid):
+    """Start _block(timeout=None) on a background thread; return
+    (thread, results, get_rid) where get_rid polls for the pending rid."""
+    monkeypatch.setattr(server, "_emit", lambda *a, **kw: None)
+    results: list[str] = []
+
+    def runner():
+        results.append(server._block("clarify.request", sid, {"question": "q"}))
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+
+    def get_rid():
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            with server._prompt_lock:
+                for rid, (owner, _ev) in server._pending.items():
+                    if owner == sid:
+                        return rid
+            time.sleep(0.01)
+        raise AssertionError("pending rid never appeared for sid=%s" % sid)
+
+    return t, results, get_rid
+
+
+def test_block_no_timeout_waits_for_delayed_answer(monkeypatch):
+    """_block(timeout=None) must keep blocking until the answer arrives —
+    no premature empty return."""
+    t, results, get_rid = _run_block_in_thread(monkeypatch, "sid_block_wait")
+    rid = get_rid()
+
+    # Answer after a short delay; _block must still be waiting.
+    time.sleep(0.3)
+    assert t.is_alive(), "_block returned before any answer was provided"
+    with server._prompt_lock:
+        server._answers[rid] = "green"
+        server._pending[rid][1].set()
+
+    t.join(timeout=5)
+    assert not t.is_alive()
+    assert results == ["green"]
+
+
+def test_clear_pending_releases_no_timeout_block(monkeypatch):
+    """_clear_pending(sid) must release a timeout=None _block with ''."""
+    t, results, get_rid = _run_block_in_thread(monkeypatch, "sid_block_clear")
+    get_rid()
+
+    server._clear_pending("sid_block_clear")
+    t.join(timeout=5)
+    assert not t.is_alive()
+    assert results == [""]
+
+
+def test_clear_pending_other_sid_does_not_release_block(monkeypatch):
+    """_clear_pending on an unrelated session must NOT release a pending
+    timeout=None _block (session scoping)."""
+    t, results, get_rid = _run_block_in_thread(monkeypatch, "sid_block_scoped")
+    rid = get_rid()
+
+    server._clear_pending("sid_some_other_session")
+    time.sleep(0.2)
+    assert t.is_alive(), (
+        "_clear_pending on another sid released a prompt owned by "
+        "sid_block_scoped — session scoping is broken"
+    )
+    assert not results
+
+    # Clean up: release properly so the thread joins.
+    with server._prompt_lock:
+        server._answers[rid] = "done"
+        server._pending[rid][1].set()
+    t.join(timeout=5)
+    assert not t.is_alive()
+    assert results == ["done"]
+
+
+# ---------------------------------------------------------------------------
 # /model switch and other agent-mutating commands must reject while the
 # session is running.  agent.switch_model() mutates self.model, self.provider,
 # self.base_url, self.client etc. in place — the worker thread running

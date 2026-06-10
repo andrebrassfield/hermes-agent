@@ -1066,7 +1066,11 @@ def _enable_gateway_prompts() -> None:
 # ── Blocking prompt factory ──────────────────────────────────────────
 
 
-def _block(event: str, sid: str, payload: dict, timeout: int = 300) -> str:
+def _block(event: str, sid: str, payload: dict, timeout: int | None = None) -> str:
+    # Blocking prompts wait for the human; interrupt/shutdown (via
+    # _clear_pending) are the only releases — v6 north-star #5.  A
+    # timeout would orphan the TUI prompt and silently feed the agent
+    # an empty answer, so callers default to waiting forever.
     rid = uuid.uuid4().hex[:8]
     ev = threading.Event()
     with _prompt_lock:
@@ -2328,7 +2332,7 @@ def _wire_callbacks(sid: str):
     from tools.terminal_tool import set_sudo_password_callback
     from tools.skills_tool import set_secret_capture_callback
 
-    set_sudo_password_callback(lambda: _block("sudo.request", sid, {}, timeout=120))
+    set_sudo_password_callback(lambda: _block("sudo.request", sid, {}))
 
     def secret_cb(env_var, prompt, metadata=None):
         pl = {"prompt": prompt, "env_var": env_var}

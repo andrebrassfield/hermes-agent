@@ -11,7 +11,6 @@
  *      (exec/plugin → system · alias → re-dispatch · skill/send → submit a turn ·
  *       prefill → notice). Long output routes to the pager (Phase 5a).
  */
-import { diagnosticsEnabled } from './env.ts'
 import { DETAILS_SECTIONS, DETAILS_USAGE, type DetailsMode, nextDetailsMode, parseDetailsMode } from './details.ts'
 import { formatBytes, memReport, performHeapdump } from './diagnostics.ts'
 import { formatSpawnTree, formatSpawnTreeList, readSpawnTreeEntries } from './replay.ts'
@@ -150,16 +149,7 @@ function present(ctx: SlashContext, title: string, text: string): void {
   else ctx.pushSystem(text)
 }
 
-/** Process-diagnostic commands — hidden behind `HERMES_TUI_DIAGNOSTICS`
- *  (logic/env.ts). Regular users never see them; support flows enable them
- *  with one env var. Keep this set in sync with the `(diag)` lines below.
- *  DESIGN ASSUMPTION (review 2026-06-12): these stay CLIENT-ONLY. Completion
- *  is gateway-driven and hides them only because the gateway doesn't know
- *  them — adding a server command with one of these names requires gating it
- *  gateway-side too (the early return below would shadow, not hide, it). */
-const DIAGNOSTIC_COMMANDS = new Set(['mem', 'heapdump'])
-
-const CLIENT_HELP_LINES = [
+const CLIENT_HELP = [
   '/help — list commands',
   '/model [name] — switch model (picker if bare)',
   '/copy [n] — copy the last (or n-th) response',
@@ -170,17 +160,12 @@ const CLIENT_HELP_LINES = [
   '/compact [on|off|toggle] — compact transcript spacing',
   '/details [hidden|collapsed|expanded|cycle] — tool/reasoning detail',
   '/replay [n|path] — inspect an archived spawn tree',
-  '/mem — live memory stats (diag)',
-  '/heapdump — write a V8 heap snapshot (diag)',
+  '/mem — live memory stats',
+  '/heapdump — write a V8 heap snapshot',
   '/logs — recent engine log lines',
   '/quit, /exit — quit',
   '(other /commands run on the gateway)'
-]
-
-function clientHelp(): string {
-  const lines = diagnosticsEnabled() ? CLIENT_HELP_LINES : CLIENT_HELP_LINES.filter(l => !l.includes('(diag)'))
-  return lines.join('\n')
-}
+].join('\n')
 
 type ClientHandler = (arg: string, ctx: SlashContext) => void | Promise<void>
 
@@ -646,9 +631,9 @@ const CLIENT: Record<string, ClientHandler> = {
     // Prefer the live catalog; fall back to the client list if it's unavailable.
     try {
       const cat = await ctx.request('commands.catalog', {})
-      ctx.pushSystem(renderCatalog(cat) || clientHelp())
+      ctx.pushSystem(renderCatalog(cat) || CLIENT_HELP)
     } catch {
-      ctx.pushSystem(clientHelp())
+      ctx.pushSystem(CLIENT_HELP)
     }
   },
   logs: (_arg, ctx) => ctx.openPager('Logs', ctx.logTail().join('\n') || '(log empty)'),
@@ -658,8 +643,7 @@ const CLIENT: Record<string, ClientHandler> = {
 
 /** The registered client-command names (catalog introspection — tests/menus). */
 export function clientCommandNames(): string[] {
-  const names = Object.keys(CLIENT)
-  return (diagnosticsEnabled() ? names : names.filter(n => !DIAGNOSTIC_COMMANDS.has(n))).sort()
+  return Object.keys(CLIENT).sort()
 }
 
 /** Render the gateway `commands.catalog` into a help block (loose-typed read).
@@ -716,12 +700,6 @@ function handleDispatchResult(parsed: ParsedSlash, raw: unknown, ctx: SlashConte
 export async function dispatchSlash(input: string, ctx: SlashContext): Promise<void> {
   const parsed = parseSlash(input)
   if (!parsed) return
-
-  if (DIAGNOSTIC_COMMANDS.has(parsed.name) && !diagnosticsEnabled()) {
-    // Not a secret — an enable switch. Tell the user exactly how to get it.
-    ctx.pushSystem(`/${parsed.name} is a diagnostic command — relaunch with HERMES_TUI_DIAGNOSTICS=1 to enable it.`)
-    return
-  }
 
   const client = CLIENT[parsed.name]
   if (client) {

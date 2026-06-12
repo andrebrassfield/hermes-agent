@@ -102,7 +102,7 @@ OpenAI = _OpenAIProxy()  # module-level name, resolves lazily on call/isinstance
 from agent.credential_pool import load_pool
 from hermes_cli.config import get_hermes_home
 from hermes_constants import OPENROUTER_BASE_URL
-from utils import base_url_host_matches, base_url_hostname, normalize_proxy_env_vars
+from utils import base_url_host_matches, base_url_hostname, model_forces_max_completion_tokens, normalize_proxy_env_vars
 
 logger = logging.getLogger(__name__)
 
@@ -2476,6 +2476,25 @@ def _is_connection_error(exc: Exception) -> bool:
     return False
 
 
+def _is_transient_transport_error(exc: Exception) -> bool:
+    """Return True for a one-off transport blip worth retrying ONCE on the
+    same provider before any provider/model fallback.
+
+    Covers connection/streaming-close errors (via the canonical
+    ``_is_connection_error`` detector, shared so the two cannot drift) plus a
+    pure 5xx/408 HTTP status. Deliberately narrow: this is the "retry the
+    same target once" gate, distinct from ``_is_payment_error`` /
+    ``_is_auth_error`` / ``_is_rate_limit_error`` which the except-chain
+    handles by switching provider, refreshing creds, or rotating the pool.
+    """
+    if _is_connection_error(exc):
+        return True
+    status = getattr(exc, "status_code", None) or getattr(
+        getattr(exc, "response", None), "status_code", None
+    )
+    return isinstance(status, int) and (status == 408 or 500 <= status < 600)
+
+
 def _is_auth_error(exc: Exception) -> bool:
     """Detect auth failures that should trigger provider-specific refresh."""
     status = getattr(exc, "status_code", None)
@@ -4281,13 +4300,15 @@ def get_auxiliary_extra_body() -> dict:
     return _nous_extra_body() if auxiliary_is_nous else {}
 
 
-def auxiliary_max_tokens_param(value: int) -> dict:
+def auxiliary_max_tokens_param(value: int, *, model: Optional[str] = None) -> dict:
     """Return the correct max tokens kwarg for the auxiliary client's provider.
-    
+
     OpenRouter and local models use 'max_tokens'. Direct OpenAI with newer
-    models (gpt-4o, o-series, gpt-5+) requires 'max_completion_tokens'.
+    models (gpt-4o, gpt-4.1, gpt-5+, o-series) requires 'max_completion_tokens'.
     The Codex adapter translates max_tokens internally, so we use max_tokens
-    for it as well.
+    for it as well. Pass ``model`` so third-party OpenAI-compatible endpoints
+    fronting the newer families are also recognised — URL-only detection
+    misses the case where a custom base URL serves e.g. ``gpt-5.4``.
     """
     custom_base = _current_custom_base_url()
     or_key = os.getenv("OPENROUTER_API_KEY")
@@ -4296,6 +4317,9 @@ def auxiliary_max_tokens_param(value: int) -> dict:
     if (not or_key
             and _read_nous_auth() is None
             and base_url_hostname(custom_base) in {"api.openai.com", "api.githubcopilot.com"}):
+        return {"max_completion_tokens": value}
+    # ...and for any caller serving a newer OpenAI-family model by name.
+    if model_forces_max_completion_tokens(model):
         return {"max_completion_tokens": value}
     return {"max_tokens": value}
 
@@ -5147,8 +5171,28 @@ def call_llm(
     # Handle unsupported temperature, max_tokens vs max_completion_tokens retry,
     # then payment fallback.
     try:
-        return _validate_llm_response(
-            client.chat.completions.create(**kwargs), task)
+        # Retry ONCE on the same provider for a one-off transient transport
+        # blip (streaming-close / incomplete chunked read / 5xx / 408) before
+        # the except-chain below escalates to provider/model fallback. A
+        # single dropped connection shouldn't abandon an otherwise-healthy
+        # provider. A second failure (or any non-transient error) falls
+        # through to ``first_err`` and the existing fallback handling
+        # unchanged. This is the unified home for the transient retry that
+        # every auxiliary task (compression, memory flush, title-gen,
+        # session-search, vision) shares. (PR #16587)
+        try:
+            return _validate_llm_response(
+                client.chat.completions.create(**kwargs), task)
+        except Exception as transient_err:
+            if not _is_transient_transport_error(transient_err):
+                raise
+            logger.info(
+                "Auxiliary %s: transient transport error; retrying once on "
+                "the same provider before fallback: %s",
+                task or "call", transient_err,
+            )
+            return _validate_llm_response(
+                client.chat.completions.create(**kwargs), task)
     except Exception as first_err:
         if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)
@@ -5614,8 +5658,22 @@ async def async_call_llm(
         kwargs["messages"] = _convert_openai_images_to_anthropic(kwargs["messages"])
 
     try:
-        return _validate_llm_response(
-            await client.chat.completions.create(**kwargs), task)
+        # Retry ONCE on the same provider for a transient transport blip
+        # before the except-chain escalates to fallback — see call_llm()
+        # for the rationale. (PR #16587)
+        try:
+            return _validate_llm_response(
+                await client.chat.completions.create(**kwargs), task)
+        except Exception as transient_err:
+            if not _is_transient_transport_error(transient_err):
+                raise
+            logger.info(
+                "Auxiliary %s (async): transient transport error; retrying "
+                "once on the same provider before fallback: %s",
+                task or "call", transient_err,
+            )
+            return _validate_llm_response(
+                await client.chat.completions.create(**kwargs), task)
     except Exception as first_err:
         if "temperature" in kwargs and _is_unsupported_temperature_error(first_err):
             retry_kwargs = dict(kwargs)

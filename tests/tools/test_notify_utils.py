@@ -81,9 +81,11 @@ def test_consume_is_scoped_to_its_session(home, monkeypatch):
     [
         ({"TERM_PROGRAM": "iTerm.app"}, "osc9"),
         ({"TERM_PROGRAM": "WarpTerminal"}, "osc9"),
-        ({"TERM_PROGRAM": "vscode"}, "osc777"),
         ({"KITTY_WINDOW_ID": "1"}, "osc9"),
         ({"WEZTERM_PANE": "0"}, "osc777"),
+        # VS Code / Cursor and Apple Terminal parse but DON'T render OSC
+        # notifications — must fall through to the OS-level path.
+        ({"TERM_PROGRAM": "vscode"}, None),
         ({"TERM_PROGRAM": "Apple_Terminal"}, None),
         ({}, None),
     ],
@@ -150,6 +152,16 @@ def test_desktop_notification_prefers_terminal_over_os(monkeypatch):
                         lambda t, m: macos_called.append((t, m)))
     notify_utils._show_desktop_notification("T", "M")
     assert macos_called == []
+
+
+def test_osascript_permission_hint_fires_once(monkeypatch, caplog):
+    import logging
+    monkeypatch.setattr(notify_utils, "_OSASCRIPT_HINT_SHOWN", False)
+    with caplog.at_level(logging.WARNING, logger=notify_utils.logger.name):
+        notify_utils._osascript_permission_hint_once()
+        notify_utils._osascript_permission_hint_once()
+    hits = [r for r in caplog.records if "Script Editor" in r.getMessage()]
+    assert len(hits) == 1
 
 
 def test_macos_prefers_terminal_notifier_when_present(monkeypatch):

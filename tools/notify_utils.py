@@ -225,8 +225,36 @@ def _show_notification_macos(title: str, message: str) -> None:
             timeout=5, capture_output=True,
         )
         logger.debug("notify: macOS notification sent via osascript")
+        _osascript_permission_hint_once()
     except Exception as e:
         logger.debug("notify: osascript notification failed: %s", e)
+
+
+_OSASCRIPT_HINT_SHOWN = False
+
+
+def _osascript_permission_hint_once() -> None:
+    """Warn once that osascript notifications need Script Editor permission.
+
+    On macOS Sequoia+, ``osascript display notification`` is attributed to
+    ``com.apple.ScriptEditor2`` and is silently dropped until the user grants
+    Script Editor notification permission — the command still exits 0, so a
+    user sees "nothing happened" with no error. Surface the one-time fix so
+    they aren't stuck. (Native terminals using the OSC path never reach here.)
+    """
+    global _OSASCRIPT_HINT_SHOWN
+    if _OSASCRIPT_HINT_SHOWN:
+        return
+    _OSASCRIPT_HINT_SHOWN = True
+    logger.warning(
+        "Desktop notifications use osascript on this terminal, which macOS "
+        "delivers as 'Script Editor' — banners are suppressed until you grant "
+        "permission once: run `open -a 'Script Editor'`, execute "
+        "`display notification \"test\" with title \"test\"` inside it, click "
+        "Allow, then check System Settings > Notifications > Script Editor. "
+        "For native banners, run Hermes in iTerm2/Ghostty/kitty/WezTerm, or "
+        "install the VS Code 'Terminal Notification' extension for Cursor."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -253,8 +281,16 @@ def _show_notification_macos(title: str, message: str) -> None:
 def _detect_terminal_osc() -> Optional[str]:
     """Return the OSC notification flavor for the current terminal, or None.
 
-    None means "unknown / unsupported (e.g. Apple Terminal)" — the caller
-    should fall back to an OS-level notifier.
+    Only terminals that actually *render* an OS notification from the escape
+    sequence are listed. terminfo.dev marks many terminals as "supporting"
+    OSC 9/777, but that only means their parser consumes the sequence — VS
+    Code/Cursor and Apple Terminal silently drop it without showing anything
+    (confirmed: microsoft/vscode#294247, anthropics/claude-code#28338). Those
+    return None so the caller falls back to an OS-level notifier (osascript).
+
+    VS Code / Cursor users who want click-to-focus can install the "Terminal
+    Notification" extension (it parses OSC 9/777 from the terminal stream);
+    that's a user-side opt-in, not something we can assume here.
     """
     if os.environ.get("KITTY_WINDOW_ID"):
         return "osc9"  # kitty also speaks the legacy OSC 9
@@ -264,9 +300,8 @@ def _detect_terminal_osc() -> Optional[str]:
     return {
         "iTerm.app": "osc9",
         "WarpTerminal": "osc9",
-        "Hyper": "osc9",
         "ghostty": "osc777",
-        "vscode": "osc777",  # VS Code AND Cursor integrated terminals
+        "WezTerm": "osc777",
     }.get(tp)
 
 

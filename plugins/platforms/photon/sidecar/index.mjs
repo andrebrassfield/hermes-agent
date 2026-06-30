@@ -554,7 +554,13 @@ function inboundStreamErrorMessage(e) {
     await new Promise((r) =>
       setTimeout(r, backoff + Math.random() * backoff * 0.2)
     );
-    backoff = Math.min(backoff * 2, 30000);
+    // Cap raised 30000ms (30s) -> 300000ms (5min) to match the Python adapter's
+    // Python-side backoff. Apple iMessage rate-limits reconnect attempts; with
+    // a 30s cap we hammer the limit, get RST_STREAM code 2 upstream, and the
+    // /healthz endpoint reports the stream as "degraded", which the Python
+    // adapter turns into an ERROR-level fatal-error pinger every ~70 minutes.
+    // 5min lets the rate-limit window expire before we retry.
+    backoff = Math.min(backoff * 2, 300000);
   }
 })();
 

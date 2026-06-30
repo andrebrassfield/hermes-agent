@@ -35,9 +35,16 @@ for _name in ("SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT", "SIGUSR1", "SIGUSR2"):
 
 
 def _signal_name(sig: Any) -> str:
-    """Return a human-readable signal name (or ``str(sig)`` as fallback)."""
+    """Return a human-readable signal name (or ``str(sig)`` as fallback).
+
+    ``sig=None`` means the planned-stop watcher fired the handler because
+    it found a planned-stop marker matching our process. This is a
+    legitimate shutdown path (the handler treats None as planned) but the
+    historical "UNKNOWN" label was confusing — distinguish it from
+    genuine unknown signals so on-call can spot regressions at a glance.
+    """
     if sig is None:
-        return "UNKNOWN"
+        return "PLANNED_STOP_MARKER"
     try:
         sig_int = int(sig)
     except (TypeError, ValueError):

@@ -24,6 +24,14 @@ from utils import normalize_proxy_url
 
 logger = logging.getLogger(__name__)
 
+# Cooldown for the fatal-error home-channel pinger. Within this window the
+# SAME (code, retryable) tuple is suppressed; a DIFFERENT code or a
+# different retryable flag still fires. Tuned for the photon reconnect
+# loop's cadence (5min reconnect cap) so a steady-state upstream
+# degradation alerts on transition only, not per cycle. Real fatal errors
+# still surface immediately (different code or first-ever transition).
+_FATAL_NOTIFY_COOLDOWN_SECONDS = 300.0
+
 # Audio file extensions Hermes recognizes for native audio delivery.
 # Kept in sync with tools/send_message_tool.py and cron/scheduler.py via
 # should_send_media_as_audio() below.
@@ -2575,9 +2583,32 @@ class BasePlatformAdapter(ABC):
                 logger.debug("Failed to write runtime status (%s) for %s: %s", context, self.platform.value, exc)
 
     async def _notify_fatal_error(self) -> None:
+        # Idempotent cooldown on the fatal-error home-channel pinger. The
+        # photon adapter's reconnect loop fires _notify_fatal_error() on
+        # every upstream-degraded transition (Apple-side rate-limit window
+        # is longer than the 5min reconnect cap), which used to ping the
+        # home channel every reconnect cycle ~ every 5min. Within the
+        # cooldown window the SAME (code, retryable) tuple is suppressed;
+        # a DIFFERENT code (e.g. SIDECAR_CRASHED after UPSTREAM_STREAM_DEGRADED)
+        # or a different retryable flag still fires. Steady-state upstream
+        # degradation therefore alerts on TRANSITION only, not per cycle.
         handler = self._fatal_error_handler
         if not handler:
             return
+
+        sig = (self._fatal_error_code, bool(self._fatal_error_retryable))
+        now = time.monotonic()
+        last_sig = getattr(self, "_fatal_notify_last_sig", None)
+        last_at = getattr(self, "_fatal_notify_last_at", 0.0)
+        if last_sig == sig and (now - last_at) < _FATAL_NOTIFY_COOLDOWN_SECONDS:
+            logger.debug(
+                "[%s] fatal-error notify suppressed (cooldown active for %s)",
+                self.platform.value, sig,
+            )
+            return
+        self._fatal_notify_last_sig = sig
+        self._fatal_notify_last_at = now
+
         result = handler(self)
         if asyncio.iscoroutine(result):
             await result

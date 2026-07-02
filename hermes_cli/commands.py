@@ -104,9 +104,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("agents", "Show active agents and running tasks", "Session",
                aliases=("tasks",)),
     CommandDef("journey", "Open the learning journey timeline",
-               "Session", aliases=("learning", "memory-graph"), cli_only=True,
-               args_hint="[list|delete <id>|edit <id>]",
-               subcommands=("list", "delete", "edit")),
+               "Session", aliases=("learning", "memory-graph"), cli_only=True),
     CommandDef("queue", "Queue a prompt for the next turn (doesn't interrupt)", "Session",
                aliases=("q",), args_hint="<prompt>"),
     CommandDef("steer", "Inject a message after the next tool call without interrupting", "Session",
@@ -246,8 +244,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
                cli_only=True, args_hint="<path>"),
     CommandDef("update", "Update Hermes Agent to the latest version", "Info"),
     CommandDef("version", "Show Hermes Agent version", "Info", aliases=("v",)),
-    CommandDef("debug", "Upload debug report (system info + logs) and get shareable links", "Info",
-               args_hint="[nous|local]"),
+    CommandDef("debug", "Upload debug report (system info + logs) and get shareable links", "Info"),
 
     # Exit
     CommandDef("quit", "Exit the CLI (use --delete to also remove session history)", "Exit",

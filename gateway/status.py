@@ -1218,8 +1218,15 @@ def _consume_pid_marker_for_self(
         matches = False
     elif target_start_time is not None and our_start_time is not None:
         matches = target_start_time == our_start_time
-    else:
+    elif target_start_time is None and our_start_time is None:
+        # Both None -- narrow PID-only fallback (Windows). Bounded by TTL.
         matches = True
+    else:
+        # Mixed case (one None, one known) -- refuse to match to prevent
+        # PID-recycling false positives on macOS. The planned-stop path
+        # still works on real signals (SIGINT/SIGTERM), only the
+        # planned-stop watcher or file-marker consume is gated here.
+        matches = False
 
     try:
         path.unlink(missing_ok=True)
@@ -1372,7 +1379,13 @@ def planned_stop_marker_targets_self() -> bool:
     our_start_time = _get_process_start_time(our_pid)
     if target_start_time is not None and our_start_time is not None:
         return target_start_time == our_start_time
-    return True
+    # Both-None case: genuine /proc-less platform (Windows). PID-only is safe.
+    # Mixed case (one None, one known): REFUSE to match.
+    # macOS recycles PIDs fast — PID + start_time must both be present and equal,
+    # otherwise a recycled PID + ttl-fresh marker fires a spurious "UNKNOWN" exit.
+    if target_start_time is None and our_start_time is None:
+        return True
+    return False
 
 
 def clear_planned_stop_marker() -> None:

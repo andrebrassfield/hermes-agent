@@ -458,7 +458,18 @@ class PhotonAdapter(BasePlatformAdapter):
                     e, backoff,
                 )
                 await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
+                # Cap raised 30s -> 300s: Apple's iMessage has internal
+                # connection-rate limiting. With 30s cap we reconnect too
+                # fast, hit RST_STREAM code 2, the sidecar marks the
+                # upstream stream DEGRADED, and operators see a fatal-error
+                # pinger every ~70 minutes (matches the 1-2h cadence
+                # observed in errors.log). With a 5min cap the iMessage
+                # rate-limit window expires before we retry, recovering
+                # the stream cleanly. The health-monitor fatal-error path
+                # is left as-is so actual unrecoverable failures still
+                # surface, but the "transient degraded" path no longer
+                # turns into operator-alert noise.
+                backoff = min(backoff * 2, 300.0)
 
     async def _monitor_sidecar_health(self) -> None:
         """Promote degraded upstream Photon stream health into reconnect.

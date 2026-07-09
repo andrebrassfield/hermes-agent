@@ -667,6 +667,32 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
     """Build the keyword arguments dict for the active API mode."""
     tools_for_api = agent.tools
 
+    # Xiaomi MiMo (opencode-go provider, mimo-v2.5 model) and a few other
+    # OpenAI-compat providers reject the entire request if any tool
+    # definition has an empty/missing function.name with HTTP 400:
+    #   "Error from provider (Xiaomi): Param Incorrect", "param": "`name` is not set"
+    # (reproduced 2026-07-09 — see hermes-provider-rules skill.)
+    # Drop those entries before sending so the rest of the catalog still works.
+    if tools_for_api:
+        _filtered = []
+        _dropped = 0
+        for _t in tools_for_api:
+            if not isinstance(_t, dict):
+                continue
+            _fn = _t.get("function") or {}
+            _name = (_fn.get("name") or "").strip() if isinstance(_fn, dict) else ""
+            if _name:
+                _filtered.append(_t)
+            else:
+                _dropped += 1
+        if _dropped:
+            logger.info(
+                "build_api_kwargs: dropped %d tool(s) with empty function.name "
+                "to avoid Xiaomi/opencode-go 400 (provider=%s, model=%s)",
+                _dropped, getattr(agent, "provider", "?"), getattr(agent, "model", "?"),
+            )
+        tools_for_api = _filtered
+
     if agent.api_mode == "anthropic_messages":
         _transport = agent._get_transport()
         anthropic_messages = agent._prepare_anthropic_messages_for_api(api_messages)

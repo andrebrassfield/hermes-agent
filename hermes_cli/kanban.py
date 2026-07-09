@@ -320,7 +320,14 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                                "worktree under the project's primary repo with a "
                                "deterministic branch. See `hermes project list`.")
     p_create.add_argument("--tenant", default=None, help="Tenant namespace")
-    p_create.add_argument("--priority", type=int, default=0, help="Priority tiebreaker")
+    p_create.add_argument("--priority", type=int, default=0,
+                          help="Priority tiebreaker (int, higher wins ties; use 1 for 'high')")
+    p_create.add_argument("--board", default=None,
+                          help="Kanban board slug (workstream scope; NOT a profile name. "
+                               "Profiles are agent identities selected with -p/--profile "
+                               "and live in ~/.hermes/profiles/. Boards are project/workstream "
+                               "scopes inside the kanban SQLite DB; see `hermes kanban boards` "
+                               "for the list, and `hermes kanban boards switch <slug>` to change.)")
     p_create.add_argument("--triage", action="store_true",
                           help="Park in triage — a specifier will flesh out the spec and promote to todo")
     p_create.add_argument("--idempotency-key", default=None,

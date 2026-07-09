@@ -2922,6 +2922,13 @@ def run_job(
             runtime_kwargs = {
                 "requested": job.get("provider"),
             }
+            if job.get("model"):
+                # Without this, resolve_runtime_provider() derives api_mode from
+                # the stale global model.default (e.g. MiniMax-M3) instead of
+                # this job's pinned model, which misroutes opencode-go/mimo-v2.5
+                # jobs into anthropic_messages mode and gets rejected by Xiaomi
+                # with "Param Incorrect: `name` is not set" (#hermes-provider-rules).
+                runtime_kwargs["target_model"] = job.get("model")
             if job.get("base_url"):
                 runtime_kwargs["explicit_base_url"] = job.get("base_url")
             runtime = resolve_runtime_provider(**runtime_kwargs)
@@ -2933,6 +2940,8 @@ def run_job(
             for entry in fb_list:
                 try:
                     fb_kwargs = {"requested": entry.get("provider")}
+                    if entry.get("model"):
+                        fb_kwargs["target_model"] = entry.get("model")
                     if entry.get("base_url"):
                         fb_kwargs["explicit_base_url"] = entry["base_url"]
                     if entry.get("api_key"):

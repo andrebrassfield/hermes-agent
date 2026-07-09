@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from hermes_constants import get_config_path, get_skills_dir, is_termux
+from hermes_constants import get_config_path, get_hermes_home, get_skills_dir, is_termux
 
 logger = logging.getLogger(__name__)
 
@@ -505,8 +505,27 @@ def get_all_skills_dirs() -> List[Path]:
 
     The local dir is always first (and always included even if it doesn't exist
     yet — callers handle that).  External dirs follow in config order.
+
+    When HERMES_HOME points at a non-default profile (e.g.
+    ``~/.hermes/profiles/observation/``), the global skills directory at
+    ``~/.hermes/skills/`` is appended AFTER the profile-scoped dir so profile
+    skills take priority but global skills remain reachable as a fallback.
     """
-    dirs = [get_skills_dir()]
+    dirs: List[Path] = [get_skills_dir()]
+
+    # Sprint 3 / T1 — global fallback for non-default profiles.
+    # Detect by checking whether HERMES_HOME's parent directory is named
+    # "profiles" (the layout: ~/.hermes/profiles/<name>/). When it is,
+    # the canonical ~/.hermes root is the grandparent. Append the global
+    # skills dir AFTER get_skills_dir() so profile-scoped skills win on
+    # collision; the global dir is searched last as a fallback.
+    hermes_home = Path(get_hermes_home())
+    if hermes_home.parent.name == "profiles":
+        canonical_root = hermes_home.parent.parent
+        global_skills = canonical_root / "skills"
+        if global_skills.is_dir():
+            dirs.append(global_skills)
+
     dirs.extend(get_external_skills_dirs())
     return dirs
 

@@ -316,6 +316,8 @@ class TestTerminalToolGatewayLifecycleGuard:
         "systemctl stop hermes-gateway.service",
         "hermes gateway restart",
         "launchctl kickstart gui/501/ai.hermes.gateway",
+        "launchctl bootout gui/501/ai.hermes.gateway",
+        "launchctl remove ai.hermes.gateway",
         "pkill -f hermes.*gateway",
     ])
     def test_blocks_lifecycle_commands_inside_gateway(self, monkeypatch, cmd):

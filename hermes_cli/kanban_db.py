@@ -6410,7 +6410,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 # ``running`` in the DB — it exited without calling
                 # ``kanban_complete`` / ``kanban_block``. Retrying won't
                 # help.
-                protocol_violation = True
+                if time.time() - started_at >= grace:
+                    protocol_violation = True
                 error_text = (
                     "worker exited cleanly (rc=0) without calling "
                     "kanban_complete or kanban_block — protocol violation"

@@ -45,6 +45,42 @@ def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):
     assert resolved["source"] == "manual"
 
 
+def test_resolve_runtime_provider_pool_entry_includes_model(monkeypatch):
+    # Regression for Bug #6 (2026-07-12): the credential-pool return path in
+    # _resolve_runtime_from_pool_entry computed effective_model for api_mode
+    # derivation but omitted it from the returned dict, so pooled providers
+    # (minimax and any pooled key) resolved with no "model" key. Auxiliary
+    # slots then hit the upstream API with an empty model and got HTTP 401.
+    class _Entry:
+        access_token = "pool-token"
+        source = "manual"
+        base_url = "https://api.minimax.io/anthropic"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "minimax")
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+
+    # Explicit target_model must survive into the resolved dict.
+    resolved = rp.resolve_runtime_provider(
+        requested="minimax", target_model="MiniMax-M3"
+    )
+    assert "model" in resolved, "pool-entry resolution dropped the model key"
+    assert resolved["model"] == "MiniMax-M3"
+
+    # With no explicit target, model falls back to the configured default.
+    monkeypatch.setattr(
+        rp, "_get_model_config", lambda: {"default": "MiniMax-M3"}
+    )
+    resolved_default = rp.resolve_runtime_provider(requested="minimax")
+    assert resolved_default.get("model") == "MiniMax-M3"
+
+
 def test_resolve_runtime_provider_nous_pool_uses_env_base_url_override(monkeypatch):
     entry = SimpleNamespace(
         provider="nous",

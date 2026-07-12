@@ -524,6 +524,14 @@ def _resolve_runtime_from_pool_entry(
     return {
         "provider": provider,
         "api_mode": api_mode,
+        # Bug #6 (2026-07-12): the pool-entry path computed effective_model for
+        # api_mode derivation but omitted it from the returned dict, so every
+        # credential-pool provider (minimax and any pooled key) resolved with no
+        # "model" key. Auxiliary slots (curator LLM phase, compression, vision,
+        # web_extract, approval, skills_hub) then called the upstream API with an
+        # empty model and got HTTP 401 / "missing model" back. effective_model is
+        # already (target_model or model_cfg.default); surface it here.
+        "model": effective_model,
         "base_url": base_url,
         "api_key": api_key,
         "source": getattr(entry, "source", "pool"),

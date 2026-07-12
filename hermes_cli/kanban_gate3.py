@@ -855,6 +855,16 @@ def _record_eval(
     excerpt = None
     if comment_excerpt:
         excerpt = comment_excerpt[:500]
+    # Advisory prefix (Q4 directive, 2026-07-12): in shadow mode, every
+    # would-block attaches the enforce-mode tool_error body to the ledger
+    # row with a "[GATE3 SHADOW — advisory only, not blocking]" prefix.
+    # Workers see this via kanban_show / comment trail. The shadow
+    # measurement is not confounded (the prefix is a label, not a logic
+    # change); the prefix teaches workers the discharge habit during the
+    # soak without coupling it to the rubric-(iii) flip-blocking criterion.
+    reason = verdict.reason
+    if effective_mode == "shadow" and verdict.status == "block":
+        reason = "[GATE3 SHADOW — advisory only, not blocking] " + (reason or "")
     row = {
         "event": "completion_would_block_gate3",
         "effective_mode": effective_mode,
@@ -864,7 +874,7 @@ def _record_eval(
             {"kind": c.kind, "target": c.target, "raw": c.raw}
             for c in verdict.claims
         ],
-        "reason": verdict.reason,
+        "reason": reason,
         "status": verdict.status,
         "reclassification_found": reclassification_found,
         "paired_check_command": paired_check_command,

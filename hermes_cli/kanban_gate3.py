@@ -282,36 +282,71 @@ def find_paired_check_command(reclass_body: str) -> Optional[str]:
     authority) lets the rejection reason name the real failure mode.
 
     Tolerates common prompt prefixes workers emit: ``$ ``, ``# ``, and
-    leading fenced-code-block wrapper lines.
+    leading fenced-code-block wrapper lines (``\```\```).
+
+    Bug-B fix (2026-07-12): the previous implementation skipped lines
+    starting with ``\```\``` as fence wrappers and never scanned INSIDE
+    fenced code blocks. A worker who wraps the check command + exit_code
+    in a markdown code fence (the natural hygiene shape) would have the
+    parser miss both, producing a false-positive GATE3_BLOCK. Surface
+    evidence: shadow ledger task_id t_98df4108.
+
+    The fix: when a line opens a fenced code block, scan INSIDE it for
+    the command + exit_code pair. The pre-block scan requires the line
+    to look command-shaped so the parser does not pick up prose.
     """
     if not reclass_body:
         return None
     if not _EXIT_PATTERN.search(reclass_body):
         return None
-    # Walk lines for the first command-shaped line. Strip common shell
-    # prompt markers (``$ `` for user, ``# `` and ``> `` for root/continuation)
-    # and markdown fenced-code wrapper lines (``\`\`\``). We deliberately
-    # do NOT include ``#`` as a leading-character strip — ``#`` is the
-    # start of every markdown heading AND the fence itself; stripping it
-    # would cause the parser to treat "## re-classification" or
-    # "# Heading" as a command.
     prompt_strip = re.compile(r"^[$>]+\s*")
-    for raw in reclass_body.splitlines():
+    fence_open = re.compile(r"^```\w*\s*$")
+    # Pre-block command heuristic: must look like a shell command invocation,
+    # not prose. Recognized verbs cover the authority allowlist plus canonical
+    # working-tree reads (which the authority check will reject anyway).
+    command_verb = re.compile(
+        r"^(?:[$>]\s*|\s*(?:git|hermes|xurl|crontab|cat|stat|head|grep|ls|"
+        r"echo|curl|wget|ssh|docker|kubectl|aws|gcloud|az|sqlite3|"
+        r"python3?|node|npm|pnpm|yarn|make|cmake|brew|apt|nix)\b)"
+    )
+    lines = reclass_body.splitlines()
+    i = 0
+    n = len(lines)
+    while i < n:
+        raw = lines[i]
         line = prompt_strip.sub("", raw.strip())
         if not line:
+            i += 1
             continue
-        # Skip fenced-code-block wrapper lines.
-        if line.startswith("```"):
-            continue
-        # Skip comment lines.
         if line.startswith("#"):
+            i += 1
             continue
-        # Skip the exit-code status line itself.
         if _EXIT_PATTERN.match(line):
+            i += 1
             continue
-        return line
+        # Bug-B fix: detect a fenced code block and scan INSIDE it.
+        if fence_open.match(line):
+            block_start = i + 1
+            block_end = block_start
+            while block_end < n and not lines[block_end].strip().startswith("```"):
+                block_end += 1
+            block_text = "\n".join(lines[block_start:block_end])
+            if _EXIT_PATTERN.search(block_text):
+                for inner in lines[block_start:block_end]:
+                    inner_line = prompt_strip.sub("", inner.strip())
+                    if not inner_line:
+                        continue
+                    if _EXIT_PATTERN.match(inner_line):
+                        continue
+                    return inner_line
+            i = block_end + 1
+            continue
+        # Pre-block case: line is the command itself, but only if it looks
+        # command-shaped. Otherwise this is prose and we keep scanning.
+        if command_verb.match(line) or line.startswith(("$", ">")):
+            return line
+        i += 1
     return None
-
 
 # ---------------------------------------------------------------------------
 # Independence check

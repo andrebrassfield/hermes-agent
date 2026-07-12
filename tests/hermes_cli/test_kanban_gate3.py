@@ -417,6 +417,50 @@ class TestExtractStructuralClaims:
             f"got targets={targets}"
         )
 
+    def test_t45e198b8_cron_id_does_not_phantom_flag(self):
+        """Bug-A regression (2026-07-12, surface evidence t_45e198b8):
+
+        The summary ``cron_id=3dade63a4609 verified`` previously extracted
+        TWO claims — one ``cron`` (correct) and one phantom ``flag_value``
+        with target ``3dade63a4609`` (the value side of ``cron_id=X`` was
+        matching the flag_value regex's ``[A-Za-z_]\\w* = [0-9]+`` shape).
+
+        Under the amended rubric the gate's block on the phantom was
+        correct (no authority for flag_value), but the phantom fills the
+        soak's presumed-true list with known-cause noise and burns worker
+        retries on a claim that doesn't actually exist. Suppress the
+        phantom by tracking cron spans and skipping overlapping flag_value
+        matches.
+        """
+        claims = gate3.extract_structural_claims(
+            summary="cron_id=3dade63a4609 verified",
+            metadata={},
+        )
+        cron_claims = [c for c in claims if c.kind == "cron"]
+        flag_claims = [c for c in claims if c.kind == "flag_value"]
+        assert len(cron_claims) == 1, (
+            f"expected exactly 1 cron claim, got {len(cron_claims)}: "
+            f"{[(c.kind, c.target) for c in claims]}"
+        )
+        assert len(flag_claims) == 0, (
+            f"phantom flag_value should be suppressed (Bug A regression); "
+            f"got {[(c.kind, c.target) for c in flag_claims]}"
+        )
+
+    def test_independent_flag_still_extracted(self):
+        """Bug-A negative case: a flag_value claim that does NOT overlap
+        a cron span must still be extracted. The fix is span-scoped, not
+        blanket-suppression."""
+        claims = gate3.extract_structural_claims(
+            summary="enabled=true then cron_id=abc scheduled",
+            metadata={},
+        )
+        cron_claims = [c for c in claims if c.kind == "cron"]
+        flag_claims = [c for c in claims if c.kind == "flag_value"]
+        assert len(cron_claims) == 1
+        assert len(flag_claims) == 1
+        assert "true" in flag_claims[0].target
+
 
 class TestFindReclassificationBlock:
     def test_no_fence_returns_none(self):

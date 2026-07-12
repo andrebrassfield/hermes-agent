@@ -179,12 +179,35 @@ def extract_structural_claims(
 
     # 1. Walk summary (literal path-shaped substrings + cron/flag regexes).
     if summary:
-        for kind, pattern in _CLAIM_PATTERNS.items():
-            # Map the dict key to the regex's named-group name. The cron
-            # and flag_value patterns use 'cron' and 'flag' as their named
-            # groups (file_path uses 'path').
-            group_name = {"file_path": "path", "cron": "cron", "flag_value": "flag"}[kind]
+        # Bug-A fix (2026-07-12): track span ranges for `cron` claims so the
+        # `flag_value` regex does not re-match the value-side of a
+        # `cron_id=X` / `job_id=X` reference as a separate flag_value
+        # claim. Surface evidence: shadow ledger task t_45e198b8, where
+        # summary "cron_id=3dade63a4609" extracted TWO claims (one cron,
+        # one phantom flag_value with target "3dade63a4609"). Under the
+        # amended rubric the gate's block was correct (phantom claim
+        # has no authority check), but the phantom fills the soak's
+        # presumed-true list with known-cause noise and burns worker
+        # retries on a claim that doesn't actually exist.
+        cron_spans: list[tuple[int, int]] = []
+        # Run cron first to establish the span ranges.
+        cron_pattern = _CLAIM_PATTERNS["cron"]
+        for m in cron_pattern.finditer(summary):
+            target = m.group("cron") or m.group(0)
+            _add("cron", m.group(0).strip(), target.strip())
+            cron_spans.append((m.start(), m.end()))
+        # Then run file_path and flag_value, skipping any flag_value match
+        # whose span overlaps a cron span (same `cron_id=X` text).
+        for kind in ("file_path", "flag_value"):
+            pattern = _CLAIM_PATTERNS[kind]
+            group_name = {"file_path": "path", "flag_value": "flag"}[kind]
             for m in pattern.finditer(summary):
+                # Bug-A fix: skip flag_value matches that overlap a cron span
+                # — the value side of `cron_id=X` is not a separate flag claim.
+                if kind == "flag_value":
+                    ms, me = m.span()
+                    if any(cs <= ms and me <= ce for cs, ce in cron_spans):
+                        continue
                 target = m.group(group_name) or m.group(0)
                 _add(kind, m.group(0).strip(), target.strip())
 

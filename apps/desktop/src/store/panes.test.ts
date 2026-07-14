@@ -97,14 +97,24 @@ describe('panes store', () => {
       expect(getPaneStateSnapshot('files')?.widthOverride).toBeUndefined()
     })
 
-    it('width override is in-memory only — not persisted across reloads', () => {
+    it('width override IS persisted (round-trips through reload via the panes store)', () => {
+      // panes.ts explicitly persists both open state AND resize overrides
+      // (see comment at panes.ts:67: "Persists both open state and resize
+      // width"), and load() reads widthOverride back from disk
+      // (panes.ts:53). The earlier test name "in-memory only — not persisted
+      // across reloads" was a stale assertion: this round-trip is deliberate
+      // so a user-resized pane keeps its width across app restart.
+      // Original commit introducing this design: c0ea9d8fc7
+      // (feat(desktop): contribution-driven shell on a layout-tree model).
       ensurePaneRegistered('files', { open: true })
       setPaneWidthOverride('files', 300)
 
       const persisted = window.localStorage.getItem(STORAGE_KEY)
 
       expect(persisted).not.toBeNull()
-      expect(JSON.parse(persisted ?? '{}')).toEqual({ files: { open: true } })
+      expect(JSON.parse(persisted ?? '{}')).toEqual({
+        files: { open: true, widthOverride: 300, heightOverride: undefined }
+      })
     })
 
     it('open flag is persisted across changes', () => {

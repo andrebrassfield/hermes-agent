@@ -24,7 +24,10 @@ describe('requestModelOptions', () => {
 
     await expect(requestModelOptions({ gateway: gateway as never, sessionId: null })).resolves.toBe(gatewayPayload)
 
-    expect(gateway.request).toHaveBeenCalledWith('model.options', {})
+    // explicitOnly defaults to true at model-options.ts:14 so chat pickers
+    // exclude ambient/unconfigured providers (#56974). The gateway-call path
+    // surfaces this as snake_case `explicit_only: true` in the params.
+    expect(gateway.request).toHaveBeenCalledWith('model.options', { explicit_only: true })
     expect(getGlobalModelOptions).not.toHaveBeenCalled()
   })
 
@@ -35,7 +38,10 @@ describe('requestModelOptions', () => {
 
     await requestModelOptions({ gateway: gateway as never, refresh: true, sessionId: 'session-1' })
 
+    // same default-truthy explanation as the previous test; refresh and
+    // session_id are also pass-through to the gateway.
     expect(gateway.request).toHaveBeenCalledWith('model.options', {
+      explicit_only: true,
       refresh: true,
       session_id: 'session-1'
     })
@@ -44,6 +50,8 @@ describe('requestModelOptions', () => {
   it('falls back to REST when no gateway is connected', async () => {
     await requestModelOptions({ refresh: true })
 
-    expect(getGlobalModelOptions).toHaveBeenCalledWith({ refresh: true })
+    // REST path passes `explicitOnly` in camelCase to getGlobalModelOptions
+    // (model-options.ts:37). Default is true; refresh is forwarded.
+    expect(getGlobalModelOptions).toHaveBeenCalledWith({ explicitOnly: true, refresh: true })
   })
 })

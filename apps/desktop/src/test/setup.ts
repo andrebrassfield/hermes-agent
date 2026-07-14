@@ -14,18 +14,45 @@ import { vi } from 'vitest'
 // Per CSSOM: the trailing space belongs ONLY to hex escapes (a leading digit),
 // never to the backslash-the-character path. `CSS.escape('a.b')` is `a\.b`,
 // not `a\. b`.
+// This is the CSSOM `CSS.escape` algorithm implemented in full, not an
+// approximation of it. Verified against the web-platform-tests vectors in
+// css/cssom/escape.html. Do not "simplify" it — every branch below is a WPT
+// case, and the cheap version (backslash anything non-alphanumeric) silently
+// gets six of them wrong.
 const cssEscape = (value: string): string => {
   const input = String(value)
+  const first = input.charCodeAt(0)
+
+  // A lone "-" is not a valid identifier and must be escaped.
+  if (input.length === 1 && first === 0x2d) {
+    return `\\${input}`
+  }
+
   let out = ''
 
   for (let i = 0; i < input.length; i++) {
-    const ch = input.charAt(i)
     const code = input.charCodeAt(i)
+
+    // NULL becomes the replacement character rather than an escape.
+    if (code === 0x00) {
+      out += '�'
+      continue
+    }
+
     const isDigit = code >= 0x30 && code <= 0x39
 
-    // A leading digit cannot be written as `\1` — it must be a hex escape, and
-    // the space is the terminator that ends the hex run.
-    if (i === 0 && isDigit) {
+    if (
+      // Control characters must be hex-escaped.
+      (code >= 0x01 && code <= 0x1f) ||
+      code === 0x7f ||
+      // A leading digit, or a digit directly after a leading "-", cannot be
+      // written as `\1` — it must be a hex escape.
+      (i === 0 && isDigit) ||
+      (i === 1 && isDigit && first === 0x2d)
+    ) {
+      // The trailing space TERMINATES the hex run. It belongs here and nowhere
+      // else — appending it to every escape (the bug this replaced) produces
+      // `a\. b` where real CSS.escape produces `a\.b`.
       out += `\\${code.toString(16)} `
       continue
     }
@@ -33,12 +60,12 @@ const cssEscape = (value: string): string => {
     const isSafe =
       code >= 0x80 ||
       isDigit ||
-      ch === '-' ||
-      ch === '_' ||
+      code === 0x2d ||
+      code === 0x5f ||
       (code >= 0x41 && code <= 0x5a) ||
       (code >= 0x61 && code <= 0x7a)
 
-    out += isSafe ? ch : `\\${ch}`
+    out += isSafe ? input.charAt(i) : `\\${input.charAt(i)}`
   }
 
   return out

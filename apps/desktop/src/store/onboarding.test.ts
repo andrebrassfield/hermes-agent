@@ -284,7 +284,10 @@ describe('OAuth onboarding', () => {
         return { ok: true, status: 'approved' }
       }
 
-      if (path === '/api/model/options') {
+      // /api/model/options always carries a query string from hermes.ts:891
+      // (e.g. include_unconfigured=1) — match by prefix so the mock mirrors
+      // production request-shape rather than exact-string.
+      if (path === '/api/model/options' || path.startsWith('/api/model/options?')) {
         return {
           providers: [
             {
@@ -357,7 +360,8 @@ describe('OAuth onboarding', () => {
 
     expect(calls.some(c => c.path === '/api/model/set')).toBe(true)
 
-    const optionsIndex = calls.findIndex(c => c.path === '/api/model/options')
+    // Same prefix-aware match as the api mock — source may send query string.
+    const optionsIndex = calls.findIndex(c => c.path === '/api/model/options' || c.path.startsWith('/api/model/options?'))
     const recommendedIndex = calls.findIndex(c => c.path.startsWith('/api/model/recommended-default'))
     const setIndex = calls.findIndex(c => c.path === '/api/model/set')
 

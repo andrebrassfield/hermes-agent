@@ -77,5 +77,15 @@ export default defineConfig({
   preview: {
     host: '127.0.0.1',
     port: 4174
+  },
+  test: {
+    // Renderer suites only. Vitest's default excludes cover node_modules/ and
+    // dist/ but NOT build/, so without this it also collects:
+    //   - electron/*.test.ts — these target node:test (see the
+    //     `test:desktop:platforms` script), not vitest, and abort with
+    //     "describe is not defined"
+    //   - build/**/*.test.js — tsc emits of those same electron suites, plus
+    //     vendored node-pty tests
+    include: ['src/**/*.{test,spec}.{ts,tsx}']
   }
 })

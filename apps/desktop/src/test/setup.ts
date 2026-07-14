@@ -1,4 +1,18 @@
-import { vi } from 'vitest'
+import { cleanup } from '@testing-library/react'
+import { afterEach, vi } from 'vitest'
+
+// Unmount anything a test rendered. Without this, components stay mounted past
+// the end of the test, React keeps pending scheduled work queued, and jsdom
+// tears the environment down underneath it — the scheduler then wakes up and
+// touches a `window` that no longer exists:
+//
+//   ReferenceError: window is not defined
+//     at performWorkOnRootViaSchedulerTask (react-dom-client.development.js)
+//
+// Vitest surfaces those as unhandled errors and warns they "might cause false
+// positive tests", which is exactly the failure mode this suite has been fixing.
+// cleanup() is idempotent, so files that already unmount are unaffected.
+afterEach(cleanup)
 
 // jsdom does not implement `CSS.escape` (real browsers, and therefore the
 // Electron renderer, have shipped it since ~2016). `timeline.tsx` calls it on

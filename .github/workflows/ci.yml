@@ -76,6 +76,12 @@ jobs:
     if: needs.detect.outputs.frontend == 'true'
     uses: ./.github/workflows/typecheck.yml
 
+  frontend-tests:
+    name: Frontend tests
+    needs: detect
+    if: needs.detect.outputs.frontend == 'true'
+    uses: ./.github/workflows/frontend-tests.yml
+
   docs-site:
     name: Docs Site
     needs: detect
@@ -140,6 +146,7 @@ jobs:
       - tests
       - lint
       - typecheck
+      - frontend-tests
       - docs-site
       - history-check
       - contributor-check

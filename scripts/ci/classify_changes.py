@@ -10,7 +10,7 @@ Lanes:
 
 * ``python``      — pytest / ruff / ty / footguns.
 * ``docker_meta`` — Dockerfiles etc.
-* ``frontend``    — TS typecheck matrix + desktop build.
+* ``frontend``    — TS typecheck matrix + desktop build + JS/TS test suites.
 * ``site``        — Docusaurus + generated skill docs.
 * ``scan``        — supply-chain scan (Python files, .pth, setup hooks).
 * ``deps``        — pyproject.toml dependency bounds check.

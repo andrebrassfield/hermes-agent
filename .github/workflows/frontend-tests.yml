@@ -1,0 +1,49 @@
+# .github/workflows/frontend-tests.yml
+#
+# Runs the JavaScript/TypeScript test suites. Until this existed, NONE of them
+# ran in CI: `tests.yml` is pytest-only, and `typecheck.yml` runs `tsc --noEmit`
+# plus a Vite build — neither executes a single JS test. The desktop renderer
+# suite (1180 tests) and the electron platform suites (326 tests) were therefore
+# only ever run by hand, which is to say: not run.
+name: Frontend tests
+
+on:
+  workflow_call:
+
+jobs:
+  # The renderer suite. `test:ui` is vitest, scoped by `test.include` in
+  # vite.config.ts to src/**/*.{test,spec}.{ts,tsx}.
+  desktop-renderer:
+    name: Desktop renderer (vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      # Keep install scripts: the renderer suite pulls in modules that reach
+      # node-pty, which needs its native binary. Mirrors `desktop-build`.
+      - uses: ./.github/actions/retry
+        with:
+          command: npm ci
+      - run: npm run --prefix apps/desktop test:ui
+
+  # The electron main-process suites. These are node:test files, NOT vitest —
+  # they import from 'node:test' and are deliberately excluded from vitest's
+  # discovery. They need the tsx loader to resolve relative .ts imports under
+  # Node ESM; without it every file dies with ERR_MODULE_NOT_FOUND before a
+  # single test runs.
+  desktop-platforms:
+    name: Desktop platform suites (node:test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: ./.github/actions/retry
+        with:
+          command: npm ci
+      - run: npm run --prefix apps/desktop test:desktop:platforms

@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Radix Select calls scrollIntoView on its items when the content opens; jsdom
@@ -20,6 +21,7 @@ const saveMoaModels = vi.fn()
 const setEnvVar = vi.fn()
 const getHermesConfigRecord = vi.fn()
 const saveHermesConfig = vi.fn()
+const setApiRequestProfile = vi.fn()
 const startManualProviderOAuth = vi.fn()
 
 vi.mock('@/hermes', () => ({
@@ -32,7 +34,13 @@ vi.mock('@/hermes', () => ({
   saveMoaModels: (body: unknown) => saveMoaModels(body),
   setEnvVar: (key: string, value: string) => setEnvVar(key, value),
   getHermesConfigRecord: () => getHermesConfigRecord(),
-  saveHermesConfig: (config: unknown) => saveHermesConfig(config)
+  saveHermesConfig: (config: unknown) => saveHermesConfig(config),
+  // setApiRequestProfile is imported transitively via '@/store/profile' (used by
+  // useOnProfileSwitch in ModelSettings). The function genuinely exists at
+  // hermes.ts:190 — model-settings.test.tsx's mock just forgot to declare it,
+  // a stale-mock bug. Sibling mocks already include it: use-prompt-actions
+  // (line 16), use-session-actions (line 29), profile.test.ts (line 16).
+  setApiRequestProfile: (profile: null | string) => setApiRequestProfile(profile)
 }))
 
 vi.mock('@/store/onboarding', () => ({
@@ -71,8 +79,17 @@ afterEach(() => {
 
 async function renderModelSettings() {
   const { ModelSettings } = await import('./model-settings')
+  // Fresh QueryClient per render so test order doesn't matter — the global
+  // queryClient singleton would otherwise carry cache across tests.
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } }
+  })
 
-  return render(<ModelSettings />)
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <ModelSettings />
+    </QueryClientProvider>
+  )
 }
 
 describe('ModelSettings', () => {

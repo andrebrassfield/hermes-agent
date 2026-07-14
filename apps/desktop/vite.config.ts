@@ -86,6 +86,9 @@ export default defineConfig({
     //     "describe is not defined"
     //   - build/**/*.test.js — tsc emits of those same electron suites, plus
     //     vendored node-pty tests
-    include: ['src/**/*.{test,spec}.{ts,tsx}']
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    // Fills jsdom's CSS.escape gap once, globally. Previously each thread test
+    // carried its own copy of the polyfill.
+    setupFiles: ['./src/test/setup.ts']
   }
 })

@@ -26,16 +26,6 @@ vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) =>
 )
 vi.stubGlobal('cancelAnimationFrame', (id: number) => window.clearTimeout(id))
 
-// jsdom does not implement `CSS.escape` (a CSSOM utility that real browsers
-// have shipped since ~2016). Tests that mount <Thread> reach timeline.tsx,
-// which calls CSS.escape on message ids to build a `[data-message-id=...]`
-// selector. Polyfill it here instead of branching the production code — the
-// production call site stays byte-identical to `CSS.escape(...)`.
-vi.stubGlobal('CSS', {
-  escape: (value: string): string =>
-    String(value).replace(/[!"#$%&'()*+,./:;<=>?@[\]\\^`{|}~]/g, ch => '\\' + ch + ' ')
-})
-
 Element.prototype.scrollTo = function scrollTo() {}
 
 function stubOffsetDimension(

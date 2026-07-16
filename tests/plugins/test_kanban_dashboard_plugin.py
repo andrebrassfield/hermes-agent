@@ -1217,6 +1217,16 @@ def test_task_detail_includes_runs(client):
     conn = _kb.connect()
     try:
         _kb.claim_task(conn, tid)
+        # Gate 3 (claim_reframing_required) requires a re-classification
+        # discharge on claim-bearing payloads. Mirror production-shape:
+        # add the discharge comment before the complete_task call.
+        _kb.add_comment(conn, tid, author="worker", body=(
+            "## re-classification\n\n"
+            "```\n"
+            "$ git show HEAD:limiter.py\n"
+            "exit_code: 0\n"
+            "```\n"
+        ))
         _kb.complete_task(
             conn, tid,
             result="done",
@@ -1255,6 +1265,22 @@ def test_patch_status_done_with_summary_and_metadata(client):
     conn = kb.connect()
     try:
         kb.claim_task(conn, tid)
+    finally:
+        conn.close()
+
+    # Gate 3 (claim_reframing_required) requires a re-classification
+    # discharge when the payload declares external state. The dashboard
+    # mirrors worker behavior — the user submits verification evidence
+    # (the discharge comment) before marking done.
+    conn = kb.connect()
+    try:
+        kb.add_comment(conn, tid, author="alice", body=(
+            "## re-classification\n\n"
+            "```\n"
+            "$ git show HEAD:a.py\n"
+            "exit_code: 0\n"
+            "```\n"
+        ))
     finally:
         conn.close()
 

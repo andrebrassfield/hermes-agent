@@ -1430,6 +1430,16 @@ def test_run_closed_on_complete_with_summary(kanban_home):
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
         kb.claim_task(conn, tid)
+        # Gate 3 (claim_reframing_required) discharges the
+        # `changed_files` claim via a re-classification comment with
+        # a paired git show echo — the production-shape discharge.
+        kb.add_comment(conn, tid, author="worker", body=(
+            "## re-classification\n\n"
+            "```\n"
+            "$ git show HEAD:limiter.py\n"
+            "exit_code: 0\n"
+            "```\n"
+        ))
         ok = kb.complete_task(
             conn, tid,
             result="shipped",

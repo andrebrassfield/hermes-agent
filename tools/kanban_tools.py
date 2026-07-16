@@ -650,6 +650,45 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"and either drop these ids from created_cards, or pass "
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
+            except kb.Gate3BlockError as gate3_err:
+                # Gate 3 (claim_reframing_required) blocked the
+                # completion because the worker's payload asserts
+                # external state (file path / cron id / flag value)
+                # without a paired re-classification + check command
+                # that queries an external authority. The audit event
+                # `completion_blocked_gate3` already landed in the DB
+                # with the specific claim + reason.
+                #
+                # The task is still in-flight. Worker must add a
+                # `kanban_comment` with a `## re-classification` fence
+                # whose body (within 5 lines) cites a check command
+                # paired with exit_code: 0. The command must query an
+                # authority external to the worker (crontab/git/xurl,
+                # not cat/[ -f ]/head/grep). File claims get PROCEDURAL
+                # proof only — cron and identity get true authority-
+                # independence. See Decision 2026-07-12.
+                verdict = gate3_err.verdict
+                claims_str = ", ".join(
+                    f"{c.kind}:{c.target}" for c in verdict.claims
+                ) or "<none>"
+                return tool_error(
+                    f"kanban_complete blocked by Gate 3 "
+                    f"(claim_reframing_required): claims=[{claims_str}]. "
+                    f"Your task is still in-flight (no state change). "
+                    f"To unblock: add a kanban_comment with a "
+                    f"`## re-classification` fence, then retry "
+                    f"kanban_complete. The fence must (1) re-derive "
+                    f"the problem from a fresh check (not restate prior "
+                    f"conclusion), (2) cite a check command paired with "
+                    f"`exit_code: 0` within 5 lines, and (3) the command "
+                    f"must query an external authority "
+                    f"(crontab -l / git show / git log --stat / "
+                    f"xurl whoami / hermes cron show) — NOT a working-"
+                    f"tree read (cat, [ -f ], head, grep <file>). "
+                    f"Note: file claims get procedural proof only — "
+                    f"cron and identity claims get true authority-"
+                    f"independence. Reason: {verdict.reason}"
+                )
             if not ok:
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"

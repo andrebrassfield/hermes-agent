@@ -640,6 +640,46 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_tail.add_argument("task_id")
     p_tail.add_argument("--interval", type=float, default=1.0)
 
+    # --- gate3 (Gate 3 claim_reframing_required operator surface) ---
+    p_gate3 = sub.add_parser(
+        "gate3",
+        help="Inspect or flip the fleet-wide Gate 3 mode (shadow/enforce)",
+        description=(
+            "Gate 3 (claim_reframing_required) blocks kanban_complete on "
+            "claim-bearing payloads unless a ## re-classification fence "
+            "is attached. The fleet-wide mode is shadow (passive "
+            "measurement, completion commits) or enforce (active "
+            "BLOCK, completion rejected). Mode lives in "
+            "~/.hermes/gate3_mode, read FRESH on every complete_task, "
+            "atomically writable. See Decision 2026-07-12."
+        ),
+    )
+    gate3_sub = p_gate3.add_subparsers(dest="gate3_action")
+    gate3_sub.add_parser(
+        "status",
+        help="Print current effective mode + recent JSONL ledger summary",
+    )
+    gate3_sub.add_parser(
+        "flip-enforce",
+        help="Atomic flip the fleet-wide mode to 'enforce' (active BLOCK)",
+    )
+    gate3_sub.add_parser(
+        "flip-shadow",
+        help="Atomic flip the fleet-wide mode to 'shadow' (passive measurement)",
+    )
+    p_gate3_replay = gate3_sub.add_parser(
+        "replay-x-path",
+        help="Non-mutating replay of a real completed task's payload through Gate 3",
+    )
+    p_gate3_replay.add_argument(
+        "--task-id", required=True,
+        help="Task ID whose real payload + last comment will be replayed",
+    )
+    p_gate3_replay.add_argument(
+        "--source", default="x_path_replay",
+        help="Source tag for the JSONL ledger row (default: x_path_replay)",
+    )
+
     # --- dispatch ---
     p_disp = sub.add_parser(
         "dispatch",
@@ -966,6 +1006,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "promote":  _cmd_promote,
             "archive":  _cmd_archive,
             "tail":     _cmd_tail,
+            "gate3":    _cmd_gate3,
             "dispatch": _cmd_dispatch,
             "daemon":   _cmd_daemon,
             "watch":    _cmd_watch,
@@ -2119,6 +2160,92 @@ def _cmd_tail(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("\n(stopped)")
         return 0
+
+
+# ---------------------------------------------------------------------------
+# Gate 3 operator surface — mode flip, status, X-path replay
+# ---------------------------------------------------------------------------
+
+def _cmd_gate3(args: argparse.Namespace) -> int:
+    """Dispatch for ``hermes kanban gate3 <sub>``.
+
+    Subcommands: status, flip-enforce, flip-shadow, replay-x-path.
+    The mode flip is the load-bearing operation — atomic write to
+    ``~/.hermes/gate3_mode``. See Decision 2026-07-12.
+    """
+    from hermes_cli import kanban_gate3 as _g3
+    sub = getattr(args, "gate3_action", None)
+    if sub == "status":
+        mode = _g3.gate3_effective_mode(at_eval=False)
+        path = _g3.gate3_mode_file()
+        ledger = _g3.gate3_ledger_file()
+        print(f"gate3 effective_mode: {mode}")
+        print(f"mode file: {path}")
+        print(f"ledger file: {ledger}")
+        if ledger.exists():
+            try:
+                import json
+                rows = [
+                    json.loads(l)
+                    for l in ledger.read_text().splitlines()
+                    if l.strip()
+                ]
+                blocks = [r for r in rows if r.get("status") == "block"]
+                passes = [r for r in rows if r.get("status") == "pass"]
+                x_replay = [
+                    r for r in rows
+                    if r.get("source") == "x_path_replay"
+                ]
+                print(f"ledger rows: {len(rows)} total, "
+                      f"{len(blocks)} blocks, {len(passes)} passes")
+                print(f"x-path replays: {len(x_replay)}")
+                if blocks:
+                    print(f"would-block rate: "
+                          f"{len(blocks) / max(1, len(rows)):.1%}")
+            except Exception as e:
+                print(f"ledger read error: {e}", file=sys.stderr)
+        return 0
+    if sub == "flip-enforce":
+        _g3.flip_gate3_mode("enforce")
+        return 0
+    if sub == "flip-shadow":
+        _g3.flip_gate3_mode("shadow")
+        return 0
+    if sub == "replay-x-path":
+        from hermes_cli import kanban_gate3 as _g3
+        tid = args.task_id
+        with kb.connect() as conn:
+            task = kb.get_task(conn, tid)
+            if task is None:
+                print(f"gate3 replay: task {tid} not found",
+                      file=sys.stderr)
+                return 1
+            summary = task.result or ""
+            comments = kb.list_comments(conn, tid)
+            last_comment_body = comments[-1].body if comments else None
+            # Capture the run's metadata (where summary/metadata live
+            # in production — the run row carries the handoff).
+            runs = kb.list_runs(conn, tid)
+            metadata = None
+            if runs:
+                latest = runs[-1]
+                metadata = latest.metadata if isinstance(latest.metadata, dict) else None
+        verdict = _g3.evaluate_only(
+            summary=summary,
+            metadata=metadata,
+            last_comment_body=last_comment_body,
+            task_id=tid,
+            profile=None,
+            source=getattr(args, "source", "x_path_replay"),
+        )
+        print(f"gate3 replay verdict: status={verdict.status} "
+              f"claims={[c.kind for c in verdict.claims]}")
+        print(f"reason: {verdict.reason}")
+        return 0
+    # No subcommand — print help.
+    print("usage: hermes kanban gate3 <status|flip-enforce|flip-shadow|replay-x-path>",
+          file=sys.stderr)
+    return 2
 
 
 def _cmd_dispatch(args: argparse.Namespace) -> int:

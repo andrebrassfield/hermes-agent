@@ -92,6 +92,8 @@ from typing import Any, Iterable, Optional
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from toolsets import get_toolset_names
 
+from hermes_cli import kanban_gate3 as _gate3
+
 _log = logging.getLogger(__name__)
 
 
@@ -1833,6 +1835,11 @@ def init_db(
     may have drifted — tests that write legacy event kinds directly,
     external tools that upgrade an old DB file — can call this to
     force re-migration.
+
+    Also ensures the fleet-wide Gate 3 mode file exists at HERMES_HOME
+    / ``gate3_mode`` with default ``shadow`` — created lazily here so a
+    fresh install never enters a state where the gate can't read its
+    mode and fail-closes. Per Decision 2026-07-12 #3 (no silent default).
     """
     if db_path is not None:
         path = db_path
@@ -1844,7 +1851,17 @@ def init_db(
     # schema + migration pass unconditionally.
     with _INIT_LOCK:
         _INITIALIZED_PATHS.discard(resolved)
-    with contextlib.closing(connect(path)):
+    with contextlib.closing(connect(path)) as conn:
+        pass
+    # Ensure the Gate 3 fleet-wide mode file exists. Lazy import to
+    # avoid a hard dep on hermes_constants at module-load time.
+    try:
+        from hermes_cli import kanban_gate3 as _g3
+        _g3.ensure_gate3_mode_file()
+    except Exception:
+        # Best-effort — if the mode file can't be created here, the
+        # first complete_task call will surface the Gate3ConfigError
+        # at eval time. Do not raise from init_db.
         pass
     return path
 
@@ -3965,7 +3982,6 @@ class HallucinatedCardsError(ValueError):
     structured access. Kept as ``ValueError`` subclass so existing
     tool-error handlers treat it as a recoverable user error.
     """
-
     def __init__(self, phantom: list[str], completing_task_id: str):
         self.phantom = list(phantom)
         self.completing_task_id = completing_task_id
@@ -3973,6 +3989,11 @@ class HallucinatedCardsError(ValueError):
             f"completion blocked: claimed created_cards that do not exist "
             f"or were not created by this worker: {', '.join(phantom)}"
         )
+
+
+# Re-export Gate3BlockError from kanban_gate3 so callers can `except kb.Gate3BlockError`
+# alongside kb.HallucinatedCardsError without a second import.
+Gate3BlockError = _gate3.Gate3BlockError
 
 
 def complete_task(
@@ -4041,6 +4062,133 @@ def complete_task(
             raise HallucinatedCardsError(phantom_cards, task_id)
     else:
         verified_cards = []
+
+    # Gate 3 — claim_reframing_required. Fires on every kanban_complete
+    # (broad scope per Decision 2026-07-12 verification gate). Only
+    # extract_structural_claims filters; zero-claim payloads skip the
+    # gate (zero-cost no-op for honest completions). Claims must be
+    # discharged by a paired check command that queries an external
+    # authority and does not read a worker-authored file.
+    #
+    # Integrity rule (Decision 2026-07-12): the verdict computation is
+    # identical between shadow and enforce. The ONLY difference is
+    # raise-vs-log at the final step. Flag check happens AFTER the
+    # verdict is computed — never upstream of computation, or the
+    # shadow measurement stops predicting enforce.
+    #
+    # Fail-closed on mode-read error: a missing/unreadable/invalid mode
+    # file is NOT a silent shadow default. Gate3ConfigError is a
+    # distinct exception so the operator can tell "gate can't read its
+    # setting" from "worker under-discharged" (Gate3BlockError).
+    last_comment_body: Optional[str] = None
+    try:
+        comments = list_comments(conn, task_id)
+        if comments:
+            last_comment_body = comments[-1].body
+    except Exception:
+        last_comment_body = None
+
+    # Compute claims + verify-discharge FIRST (identical in shadow/enforce).
+    claims = _gate3.extract_structural_claims(summary=summary, metadata=metadata)
+    _gate3._record_skip() if not claims else None  # skip canary
+    if claims:
+        _gate3_verdict = _gate3.gate3_claim_reframing_required(
+            summary=summary,
+            metadata=metadata,
+            last_comment_body=last_comment_body,
+        )
+        # Parse the re-class block + paired check for the ledger excerpt
+        # (matches what evaluate_only does; no forked pre-processing).
+        reclass = _gate3.find_reclassification_block(last_comment_body)
+        check_cmd = _gate3.find_paired_check_command(reclass) if reclass else None
+
+        # Read the fleet-wide mode FRESH on every eval — this is the
+        # provably-fleet-wide receipt. Done before any branch.
+        try:
+            _mode = _gate3.gate3_effective_mode(at_eval=True)
+        except _gate3.Gate3ConfigError as cfg_err:
+            # Distinct event kind from completion_blocked_gate3 so the
+            # operator can tell gate-config-error from worker-under-
+            # discharged. Loud + fixable: this BLOCKS the completion
+            # until the mode file is repaired.
+            with write_txn(conn):
+                _append_event(
+                    conn, task_id, "completion_blocked_gate3_config_error",
+                    {
+                        "reason": str(cfg_err),
+                    },
+                )
+            # Emit a ledger row even on config error — the operator needs
+            # to see this in the flip receipt.
+            _gate3._record_eval(
+                effective_mode="<unreadable>",
+                verdict=_gate3.Gate3Verdict(
+                    status="block",
+                    claims=claims,
+                    reason=f"GATE3_CONFIG_ERROR: {cfg_err}",
+                ),
+                task_id=task_id,
+                profile=None,
+                reclassification_found=reclass is not None,
+                paired_check_command=check_cmd,
+                comment_excerpt=last_comment_body,
+            )
+            raise Gate3BlockError(
+                _gate3.Gate3Verdict(
+                    status="block",
+                    claims=claims,
+                    reason=f"GATE3_CONFIG_ERROR: {cfg_err}",
+                ),
+                task_id,
+            )
+
+        # Non-skip eval: log to JSONL (pass AND block both write, per
+        # Decision 2026-07-12 #2). Branches:
+        #   shadow + pass → log, continue (commit the completion)
+        #   shadow + block → log, continue (commit; the would-block is
+        #     recorded for the operator's review)
+        #   enforce + pass → log, continue
+        #   enforce + block → log, raise (the load-bearing BLOCK path)
+        if _gate3_verdict.passed:
+            _gate3._record_eval(
+                effective_mode=_mode,
+                verdict=_gate3_verdict,
+                task_id=task_id,
+                profile=None,
+                reclassification_found=reclass is not None,
+                paired_check_command=check_cmd,
+                comment_excerpt=last_comment_body,
+            )
+        else:
+            # Block path — log first, then branch on mode.
+            with write_txn(conn):
+                _append_event(
+                    conn, task_id, "completion_blocked_gate3",
+                    {
+                        "effective_mode": _mode,
+                        "claims": [
+                            {"kind": c.kind, "target": c.target, "raw": c.raw}
+                            for c in _gate3_verdict.claims
+                        ],
+                        "reason": _gate3_verdict.reason,
+                        "status": _gate3_verdict.status,
+                    },
+                )
+            _gate3._record_eval(
+                effective_mode=_mode,
+                verdict=_gate3_verdict,
+                task_id=task_id,
+                profile=None,
+                reclassification_found=reclass is not None,
+                paired_check_command=check_cmd,
+                comment_excerpt=last_comment_body,
+            )
+            if _mode == "enforce":
+                raise Gate3BlockError(_gate3_verdict, task_id)
+            # shadow: continue — the completion commits. The operator
+            # reviews the ledger to decide the flip. (a) per Decision
+            # 2026-07-12 #1: shadow is a passive measurement, not a
+            # teaching surface. Teaching lives in SOUL/skill/tool_error.
 
     with write_txn(conn):
         if expected_run_id is None:

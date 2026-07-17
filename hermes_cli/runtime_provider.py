@@ -921,7 +921,14 @@ def _resolve_named_custom_runtime(
     requested_provider: str,
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
+    target_model: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
+    # Effective model for the bug #6 bug class (sweep shard 2026-07-17):
+    # prefer the caller's target_model override so /model mid-session
+    # switches survive into the returned dict, fall back to the
+    # configured default. Surfaced on every returned runtime below.
+    _effective_model = (target_model or _get_model_config().get("default"))  # type: ignore[assignment]
+
     # Bare `provider="custom"` with an explicit base_url (e.g. propagated
     # from a `model_aliases:` direct-alias resolution) — build a runtime
     # directly so the alias's base_url actually takes effect.
@@ -947,6 +954,12 @@ def _resolve_named_custom_runtime(
         pool_result = _try_resolve_from_custom_pool(base_url, "custom", None)
         if pool_result:
             pool_result["source"] = "direct-alias"
+            # Bug #6 bug class (sweep shard 2026-07-17): the credential-pool
+            # path already surfaces model; this guard covers the case where
+            # the pool didn't fill it in (e.g. pool path delegated but
+            # didn't propagate model for a bare "custom" alias).
+            if "model" not in pool_result:
+                pool_result["model"] = _effective_model
             return pool_result
         _da_is_openai_url   = base_url_host_matches(base_url, "openai.com") or base_url_host_matches(base_url, "openai.azure.com")
         _da_is_openrouter   = base_url_host_matches(base_url, "openrouter.ai")
@@ -970,6 +983,7 @@ def _resolve_named_custom_runtime(
             "base_url": base_url,
             "api_key": api_key,
             "source": "direct-alias",
+            "model": _effective_model,
             "requested_provider": requested_provider,
         }
 
@@ -992,6 +1006,12 @@ def _resolve_named_custom_runtime(
         model_name = custom_provider.get("model")
         if model_name:
             pool_result["model"] = model_name
+        elif "model" not in pool_result:
+            # Bug #6 bug class (sweep shard 2026-07-17): fall back to
+            # _effective_model so callers see a non-empty model when the
+            # custom_providers entry doesn't pin one and the pool path
+            # didn't surface one.
+            pool_result["model"] = _effective_model
         if isinstance(custom_provider.get("max_output_tokens"), int):
             pool_result["max_output_tokens"] = custom_provider["max_output_tokens"]
         request_overrides = _custom_provider_request_overrides(custom_provider)
@@ -1031,6 +1051,11 @@ def _resolve_named_custom_runtime(
         "base_url": base_url,
         "api_key": api_key or "no-key-required",
         "source": f"custom_provider:{custom_provider.get('name', requested_provider)}",
+        # Bug #6 bug class (sweep shard 2026-07-17): surface target_model
+        # so callers see a non-empty model even when custom_provider doesn't
+        # pin one explicitly. The custom_provider.get("model") override
+        # below is still applied after this default so explicit wins.
+        "model": _effective_model,
     }
     # Propagate the model name so callers can override self.model when the
     # provider name differs from the actual model string the API expects.
@@ -1334,6 +1359,7 @@ def _resolve_azure_foundry_runtime(
             "auth_mode": auth_mode,
             "entra": clean_entra,
             "source": source,
+            "model": effective_model,
             "requested_provider": requested_provider,
         }
 
@@ -1364,6 +1390,7 @@ def _resolve_azure_foundry_runtime(
         "api_key": api_key,
         "auth_mode": "api_key",
         "source": source,
+        "model": effective_model,
         "requested_provider": requested_provider,
     }
 
@@ -1375,7 +1402,12 @@ def _resolve_explicit_runtime(
     model_cfg: Dict[str, Any],
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
+    target_model: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
+    # Bug #6 bug class (sweep shard 2026-07-17): every branch below must
+    # surface a non-empty "model" key. Compute once at the top so each
+    # early-return can use it.
+    _effective_model = (target_model or model_cfg.get("default"))  # type: ignore[assignment]
     explicit_api_key = str(explicit_api_key or "").strip()
     explicit_base_url = str(explicit_base_url or "").strip().rstrip("/")
     if not explicit_api_key and not explicit_base_url:
@@ -1405,6 +1437,7 @@ def _resolve_explicit_runtime(
             "base_url": base_url,
             "api_key": api_key,
             "source": "explicit",
+            "model": _effective_model,
             "requested_provider": requested_provider,
         }
 
@@ -1425,6 +1458,7 @@ def _resolve_explicit_runtime(
             "api_key": api_key,
             "source": "explicit",
             "last_refresh": last_refresh,
+            "model": _effective_model,
             "requested_provider": requested_provider,
         }
 
@@ -1462,6 +1496,7 @@ def _resolve_explicit_runtime(
             "api_key": api_key,
             "source": "explicit",
             "expires_at": expires_at,
+            "model": _effective_model,
             "requested_provider": requested_provider,
         }
 
@@ -1472,6 +1507,7 @@ def _resolve_explicit_runtime(
             model_cfg=model_cfg,
             explicit_api_key=explicit_api_key,
             explicit_base_url=explicit_base_url,
+            target_model=target_model,
         )
 
     pconfig = PROVIDER_REGISTRY.get(provider)
@@ -1517,6 +1553,7 @@ def _resolve_explicit_runtime(
             "base_url": base_url.rstrip("/"),
             "api_key": api_key,
             "source": "explicit",
+            "model": _effective_model,
             "requested_provider": requested_provider,
         }
 
@@ -1542,6 +1579,14 @@ def resolve_runtime_provider(
     """
     requested_provider = resolve_requested_provider(requested)
 
+    # Bug #6 bug class (sweep shard 2026-07-17): every return path in this
+    # function MUST surface a non-empty "model" key. Auxiliary slots (curator,
+    # compression, vision, web_extract, approval, skills_hub) downstream hit
+    # the upstream API with whatever we hand back; an empty model triggers
+    # HTTP 401 / "missing model" and the worker dies at boot. Compute the
+    # effective model once at the top so every branch below can use it.
+    _effective_model_for_return: Optional[str] = (target_model or _get_model_config().get("default"))  # type: ignore[assignment]
+
     if requested_provider == "moa":
         return {
             "provider": "moa",
@@ -1549,6 +1594,7 @@ def resolve_runtime_provider(
             "base_url": "moa://local",
             "api_key": "moa-virtual-provider",
             "source": "moa-virtual-provider",
+            "model": _effective_model_for_return,
             "requested_provider": requested_provider,
         }
 
@@ -1569,6 +1615,7 @@ def resolve_runtime_provider(
             "base_url": _eff_base.rstrip("/"),
             "api_key": _azure_key,
             "source": "azure-explicit",
+            "model": _effective_model_for_return,
             "requested_provider": requested_provider,
         }
 
@@ -1617,6 +1664,7 @@ def resolve_runtime_provider(
             "base_url": base_url.rstrip("/"),
             "api_key": token,
             "source": "vertex-oauth",
+            "model": _effective_model_for_return,
             "requested_provider": requested_provider,
         }
 
@@ -1624,6 +1672,7 @@ def resolve_runtime_provider(
         requested_provider=requested_provider,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
+        target_model=target_model,
     )
     if custom_runtime:
         custom_runtime["requested_provider"] = requested_provider
@@ -1678,6 +1727,7 @@ def resolve_runtime_provider(
         model_cfg=model_cfg,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
+        target_model=target_model,
     )
     if explicit_runtime:
         return explicit_runtime
@@ -1770,6 +1820,7 @@ def resolve_runtime_provider(
                 "api_key": creds.get("api_key", ""),
                 "source": creds.get("source", "portal"),
                 "expires_at": creds.get("expires_at"),
+                "model": _effective_model_for_return,
                 "requested_provider": requested_provider,
             }
         except AuthError:
@@ -1790,6 +1841,7 @@ def resolve_runtime_provider(
                 "api_key": creds.get("api_key", ""),
                 "source": creds.get("source", "hermes-auth-store"),
                 "last_refresh": creds.get("last_refresh"),
+                "model": _effective_model_for_return,
                 "requested_provider": requested_provider,
             }
         except AuthError:
@@ -1810,6 +1862,7 @@ def resolve_runtime_provider(
                 "api_key": creds.get("api_key", ""),
                 "source": creds.get("source", "hermes-auth-store"),
                 "last_refresh": creds.get("last_refresh"),
+                "model": _effective_model_for_return,
                 "requested_provider": requested_provider,
             }
         except AuthError:
@@ -1828,6 +1881,7 @@ def resolve_runtime_provider(
                 "api_key": creds.get("api_key", ""),
                 "source": creds.get("source", "qwen-cli"),
                 "expires_at_ms": creds.get("expires_at_ms"),
+                "model": _effective_model_for_return,
                 "requested_provider": requested_provider,
             }
         except AuthError:
@@ -1847,6 +1901,7 @@ def resolve_runtime_provider(
                 "base_url": creds["base_url"],
                 "api_key": creds["api_key"],
                 "source": creds.get("source", "oauth"),
+                "model": _effective_model_for_return,
                 "requested_provider": requested_provider,
             }
 
@@ -1860,6 +1915,7 @@ def resolve_runtime_provider(
             "command": creds.get("command", ""),
             "args": list(creds.get("args") or []),
             "source": creds.get("source", "process"),
+            "model": _effective_model_for_return,
             "requested_provider": requested_provider,
         }
 
@@ -1929,6 +1985,7 @@ def resolve_runtime_provider(
             "base_url": base_url,
             "api_key": token,
             "source": "env",
+            "model": _effective_model_for_return,
             "requested_provider": requested_provider,
         }
 
@@ -1985,6 +2042,7 @@ def resolve_runtime_provider(
                 "source": auth_source,
                 "region": region,
                 "bedrock_anthropic": True,  # Signal to use AnthropicBedrock client
+                "model": _effective_model_for_return,
                 "requested_provider": requested_provider,
             }
         else:
@@ -1996,6 +2054,7 @@ def resolve_runtime_provider(
                 "api_key": "aws-sdk",
                 "source": auth_source,
                 "region": region,
+                "model": _effective_model_for_return,
                 "requested_provider": requested_provider,
             }
         if guardrail_config:
@@ -2057,6 +2116,7 @@ def resolve_runtime_provider(
             "base_url": base_url,
             "api_key": creds.get("api_key", ""),
             "source": creds.get("source", "env"),
+            "model": _effective_model_for_return,
             "requested_provider": requested_provider,
         }
 

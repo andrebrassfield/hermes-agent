@@ -2121,8 +2121,16 @@ def test_named_custom_runtime_propagates_extra_body_pool_path(monkeypatch):
     }
 
 
-def test_named_custom_runtime_no_model_when_absent(monkeypatch):
-    """When custom_providers entry has no model field, runtime should not either."""
+def test_named_custom_runtime_model_defaults_when_absent(monkeypatch):
+    """When custom_providers entry has no model field AND no target_model,
+    runtime should still surface a model key (value may be None). Bug #6
+    sweep shard 2026-07-17 changed the contract: `model` is now a hard
+    invariant on every returned runtime, not an optional pass-through.
+    Callers that need a non-empty model must pass target_model=... at the
+    call site. The prior contract asserted `model not in resolved` —
+    that was the omission-as-feature shape that caused aux slots to
+    crash with HTTP 401 / "missing model" downstream.
+    """
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "my-server")
     monkeypatch.setattr(
         rp, "_get_named_custom_provider",
@@ -2135,7 +2143,12 @@ def test_named_custom_runtime_no_model_when_absent(monkeypatch):
     monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
 
     resolved = rp.resolve_runtime_provider(requested="my-server")
-    assert "model" not in resolved
+    assert "model" in resolved, (
+        "named_custom_runtime must surface a model key after the "
+        "Bug #6 sweep (2026-07-17); value may be None when no "
+        "target_model is passed and no default is configured"
+    )
+    assert resolved["model"] is None
 
 
 # ---------------------------------------------------------------------------

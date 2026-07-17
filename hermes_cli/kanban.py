@@ -680,6 +680,35 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         help="Source tag for the JSONL ledger row (default: x_path_replay)",
     )
 
+    # --- gate4 (Gate 4 dirty-tree check — shadow-only operator CLI) ---
+    # ENFORCE FLIP IS DRE-ONLY. See Decision 2026-07-16 §2.
+    p_gate4 = sub.add_parser(
+        "gate4",
+        help="Inspect or flip the fleet-wide Gate 4 mode (shadow/enforce)",
+        description=(
+            "Gate 4 (dirty-tree check) blocks kanban_complete when the "
+            "task's declared repo or workspace has uncommitted tracked changes "
+            "or untracked source files. The fleet-wide mode is shadow (passive "
+            "measurement, completion commits) or enforce (active BLOCK). "
+            "Mode lives in ~/.hermes/gate4_mode, read FRESH on every "
+            "complete_task. See Decision 2026-07-16. "
+            "NOTE: enforce flip is DRE-ONLY."
+        ),
+    )
+    gate4_sub = p_gate4.add_subparsers(dest="gate4_action")
+    gate4_sub.add_parser(
+        "status",
+        help="Print current effective mode + recent JSONL ledger summary",
+    )
+    gate4_sub.add_parser(
+        "flip-enforce",
+        help="Atomic flip to 'enforce' (DRE-ONLY — see Decision 2026-07-16)",
+    )
+    gate4_sub.add_parser(
+        "flip-shadow",
+        help="Atomic flip to 'shadow' (passive measurement)",
+    )
+
     # --- dispatch ---
     p_disp = sub.add_parser(
         "dispatch",
@@ -1007,6 +1036,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "archive":  _cmd_archive,
             "tail":     _cmd_tail,
             "gate3":    _cmd_gate3,
+            "gate4":    _cmd_gate4,
             "dispatch": _cmd_dispatch,
             "daemon":   _cmd_daemon,
             "watch":    _cmd_watch,
@@ -2246,6 +2276,35 @@ def _cmd_gate3(args: argparse.Namespace) -> int:
     print("usage: hermes kanban gate3 <status|flip-enforce|flip-shadow|replay-x-path>",
           file=sys.stderr)
     return 2
+
+
+def _cmd_gate4(args: argparse.Namespace) -> int:
+    """Dispatch for ``hermes kanban gate4 <sub>``.
+
+    Subcommands: status, flip-enforce, flip-shadow.
+    ENFORCE FLIP IS DRE-ONLY — enforced here by the CLI description,
+    not mechanically. See Decision 2026-07-16 §2.
+    """
+    from hermes_cli import kanban_gate4 as _g4
+    sub = getattr(args, "gate4_action", None)
+    if sub is None:
+        # No subcommand — show status
+        for line in _g4.gate4_status_lines():
+            print(line)
+        return 0
+    if sub == "status":
+        for line in _g4.gate4_status_lines():
+            print(line)
+        return 0
+    if sub == "flip-enforce":
+        # DRE-ONLY gate — note in description; no mechanical enforcement
+        _g4.flip_gate4_mode("enforce")
+        return 0
+    if sub == "flip-shadow":
+        _g4.flip_gate4_mode("shadow")
+        return 0
+    print(f"unknown gate4 subcommand: {sub}", file=sys.stderr)
+    return 1
 
 
 def _cmd_dispatch(args: argparse.Namespace) -> int:

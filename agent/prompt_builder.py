@@ -286,7 +286,14 @@ KANBAN_GUIDANCE = (
     "specialist profile.\n"
     "- Do not call `delegate_task` as a board substitute. `delegate_task` is "
     "for short reasoning subtasks inside your own run; board tasks are for "
-    "cross-agent handoffs that outlive one API loop."
+    "cross-agent handoffs that outlive one API loop.\n"
+    "- Do not leave a worktree workspace with uncommitted changes when the "
+    "task is done. A dirty worktree (uncommitted tracked changes or untracked "
+    "source files) at completion time means the work isn't actually committed "
+    "to the repo — it exists only in the workspace. Before calling "
+    "`kanban_complete`, either commit the work or surface a blocker explaining "
+    "why the snapshot cannot be committed in this run. This is enforced by "
+    "Gate 4 (dirty-tree check) on the fleet.\n"
 )
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (

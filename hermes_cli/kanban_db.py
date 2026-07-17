@@ -93,6 +93,7 @@ from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missi
 from toolsets import get_toolset_names
 
 from hermes_cli import kanban_gate3 as _gate3
+from hermes_cli import kanban_gate4 as _gate4
 
 _log = logging.getLogger(__name__)
 
@@ -1840,6 +1841,10 @@ def init_db(
     / ``gate3_mode`` with default ``shadow`` — created lazily here so a
     fresh install never enters a state where the gate can't read its
     mode and fail-closes. Per Decision 2026-07-12 #3 (no silent default).
+
+    Also ensures the fleet-wide Gate 4 mode file exists at HERMES_HOME
+    / ``gate4_mode`` with default ``shadow``, mirroring Gate 3 exactly.
+    Per Decision 2026-07-16 §2.
     """
     if db_path is not None:
         path = db_path
@@ -1861,6 +1866,16 @@ def init_db(
     except Exception:
         # Best-effort — if the mode file can't be created here, the
         # first complete_task call will surface the Gate3ConfigError
+        # at eval time. Do not raise from init_db.
+        pass
+    # Ensure the Gate 4 fleet-wide mode file exists. Same lazy-import,
+    # best-effort pattern as Gate 3 above.
+    try:
+        from hermes_cli import kanban_gate4 as _g4
+        _g4.ensure_gate4_mode_file()
+    except Exception:
+        # Best-effort — if the mode file can't be created here, the
+        # first complete_task call will surface the Gate4ConfigError
         # at eval time. Do not raise from init_db.
         pass
     return path
@@ -3995,6 +4010,9 @@ class HallucinatedCardsError(ValueError):
 # alongside kb.HallucinatedCardsError without a second import.
 Gate3BlockError = _gate3.Gate3BlockError
 
+# Re-export Gate4ConfigError similarly.
+Gate4ConfigError = _gate4.Gate4ConfigError
+
 
 def complete_task(
     conn: sqlite3.Connection,
@@ -4189,6 +4207,90 @@ def complete_task(
             # reviews the ledger to decide the flip. (a) per Decision
             # 2026-07-12 #1: shadow is a passive measurement, not a
             # teaching surface. Teaching lives in SOUL/skill/tool_error.
+
+    # Gate 4 — dirty-tree check. Mirrors Gate 3 mechanics exactly:
+    #   - Mode file ~/.hermes/gate4_mode, read FRESH per eval.
+    #   - Default: shadow. Fail-closed on missing mode file.
+    #   - Verdict computation identical in shadow and enforce.
+    #   - Only raise-vs-log differs at the final step.
+    # Decision 2026-07-16 §2. ENFORCE FLIP IS DRE-ONLY.
+    try:
+        _g4_mode = _gate4.gate4_effective_mode(at_eval=True)
+    except _gate4.Gate4ConfigError as g4_cfg_err:
+        with write_txn(conn):
+            _append_event(
+                conn, task_id, "completion_blocked_gate4_config_error",
+                {"reason": str(g4_cfg_err)},
+            )
+        _gate4._record_gate4_eval(
+            effective_mode="<unreadable>",
+            verdict=_gate4.Gate4Verdict(
+                status="block",
+                reason=f"GATE4_CONFIG_ERROR: {g4_cfg_err}",
+            ),
+            task_id=task_id,
+            profile=None,
+            workspace_path=None,
+            declared_repo=None,
+        )
+        raise _gate4.Gate4ConfigError(g4_cfg_err)
+
+    # Fetch workspace info for the dirty-tree check
+    _task = get_task(conn, task_id)
+    _ws_path = _task.workspace_path if _task else None
+
+    _g4_verdict = _gate4.gate4_dirty_tree_check(
+        workspace_path=_ws_path,
+        declared_repo=None,  # declared_repo not available in this scope
+        kanban_task_id=task_id,
+        profile=None,
+    )
+
+    if _g4_verdict.passed:
+        # Pass path: log too (Decision 2026-07-16 §2 — "Shadow logs pass
+        # AND block to a JSONL ledger", mirrors Gate 3's pass-logging
+        # exactly). A pass with dirty_repos == [] means zero repos were
+        # checkable (no declared_repo, no on-disk workspace_path, no
+        # HERMES_KANBAN_WORKSPACE) — distinct from a pass where repos
+        # were actually inspected and found clean (dirty_repos populated
+        # with dirty=False entries). Without this row, both cases were
+        # previously indistinguishable in the ledger (in fact neither
+        # was ever logged), which meant a week of shadow data couldn't
+        # honestly justify flipping enforce — "no evidence" was
+        # masquerading as "evidence of clean."
+        _gate4._record_gate4_eval(
+            effective_mode=_g4_mode,
+            verdict=_g4_verdict,
+            task_id=task_id,
+            profile=None,
+            workspace_path=_ws_path,
+            declared_repo=None,
+        )
+    else:
+        # Block path: log first, then branch on mode
+        with write_txn(conn):
+            _append_event(
+                conn, task_id, "completion_blocked_gate4",
+                {
+                    "effective_mode": _g4_mode,
+                    "dirty_repos": _g4_verdict.dirty_repos,
+                    "reason": _g4_verdict.reason,
+                    "status": _g4_verdict.status,
+                },
+            )
+        _gate4._record_gate4_eval(
+            effective_mode=_g4_mode,
+            verdict=_g4_verdict,
+            task_id=task_id,
+            profile=None,
+            workspace_path=_ws_path,
+            declared_repo=None,
+        )
+        if _g4_mode == "enforce":
+            raise _gate4.Gate4ConfigError(
+                f"Gate 4: dirty tree — {_g4_verdict.reason}"
+            )
+        # shadow: continue
 
     with write_txn(conn):
         if expected_run_id is None:

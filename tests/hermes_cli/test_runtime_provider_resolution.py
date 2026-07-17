@@ -3411,3 +3411,54 @@ def test_resolve_named_custom_runtime_pool_result_includes_extra_headers(monkeyp
     }
     assert resolved["api_key"] == "pooled-key"
     assert resolved["source"] == "pool:lmstudio-pool"
+
+
+def test_resolve_openrouter_runtime_surfaces_model(monkeypatch):
+    # Bug class mirror of test_resolve_runtime_provider_pool_entry_includes_model
+    # (line 48, Bug #6 2026-07-12): the openrouter-fallback resolver path
+    # computed effective_model for api_mode derivation but omitted it from
+    # the returned dict, so the openrouter-fallback resolver surfaced to
+    # callers (resolve_runtime_provider at lines 1661 and 2063) without a
+    # "model" key. The same invariant Bug #6 established for the pool path
+    # therefore also fails here. Contract: _resolve_openrouter_runtime MUST
+    # always return a dict with a non-empty "model" field. Decision 2026-07-16:
+    # only this one path is fixed in this shard; the remaining 13 sibling
+    # paths are tracked in the backlog card and will be covered by a
+    # parametrised invariant test when the sweep lands.
+    monkeypatch.setattr(
+        rp, "_get_model_config", lambda: {"default": "MiniMax-M3"}
+    )
+
+    # Path 1: no explicit target — resolver must fall back to the configured
+    # default. On unfixed main, the resolver omits the "model" key entirely,
+    # so r.get("model") returns None and this assertion fires on the invariant
+    # rather than on a TypeError, keeping the diagnostic pointed at the bug.
+    resolved_default = rp._resolve_openrouter_runtime(
+        requested_provider="openrouter",
+        explicit_api_key="sk-test-fake",
+        explicit_base_url="https://openrouter.ai/api/v1",
+    )
+    assert "model" in resolved_default, (
+        "openrouter-fallback resolver dropped the model key (Bug class "
+        "mirror of #6, 2026-07-12)"
+    )
+    assert resolved_default.get("model") == "MiniMax-M3", (
+        "openrouter-fallback resolver returned an empty model when no "
+        "explicit target was supplied (Bug class mirror of #6, 2026-07-12)"
+    )
+
+    # Path 2: a different configured default must also survive into the
+    # returned dict — guards against any future regression that hard-codes
+    # a single model name.
+    monkeypatch.setattr(
+        rp, "_get_model_config", lambda: {"default": "anthropic/claude-opus-4"}
+    )
+    resolved_other = rp._resolve_openrouter_runtime(
+        requested_provider="openrouter",
+        explicit_api_key="sk-test-fake",
+        explicit_base_url="https://openrouter.ai/api/v1",
+    )
+    assert resolved_other.get("model") == "anthropic/claude-opus-4", (
+        "openrouter-fallback resolver did not surface the configured "
+        "default for a non-pinned model name"
+    )

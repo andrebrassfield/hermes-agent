@@ -1053,6 +1053,7 @@ def _resolve_openrouter_runtime(
     requested_provider: str,
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
+    target_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     model_cfg = _get_model_config()
     cfg_base_url = model_cfg.get("base_url") if isinstance(model_cfg.get("base_url"), str) else ""
@@ -1177,6 +1178,13 @@ def _resolve_openrouter_runtime(
     if effective_provider == "custom" and not api_key and not _is_openrouter_url:
         api_key = "no-key-required"
 
+    # Resolve the model field: prefer the explicit target_model override,
+    # fall back to the configured default. This mirrors the pattern used
+    # by _resolve_runtime_from_pool_entry (line ~534, already fixed).
+    # Decision 2026-07-16: only the openrouter-fallback path is patched
+    # here; the remaining 13 paths are tracked in the backlog card.
+    effective_model: Optional[str] = target_model or model_cfg.get("default")  # type: ignore[assignment]
+
     return {
         "provider": effective_provider,
         "api_mode": _resolve_plain_custom_api_mode(model_cfg, base_url)
@@ -1187,6 +1195,7 @@ def _resolve_openrouter_runtime(
         "base_url": base_url,
         "api_key": api_key,
         "source": source,
+        "model": effective_model,
     }
 
 

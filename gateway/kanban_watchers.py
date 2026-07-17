@@ -25,6 +25,28 @@ from agent.i18n import t
 logger = logging.getLogger("gateway.run")
 
 
+def _board_dispatchable(slug: str) -> bool:
+    """True when the board has a DB file on disk to dispatch against.
+
+    A board with no DB has no tasks, so ticking it is pure overhead — and
+    worse, ``connect()`` would historically CREATE the file as a side
+    effect. For the always-enumerated ``default`` slug that lazily
+    resurrected an archived legacy ``<root>/kanban.db`` on every tick
+    (observed live 2026-07-17); ``kanban_db.connect()`` now fails loud on
+    that shape, which surfaced here as a tick-failed ERROR every 60s.
+    Skipping DB-less boards fixes both: no side-effect creation, no noise.
+
+    Fails open (True) on any probe error so a filesystem hiccup can never
+    silence dispatch for a real board — ``connect()`` remains the
+    authoritative gate.
+    """
+    try:
+        from hermes_cli import kanban_db as _kb
+        return _kb.kanban_db_path(slug).exists()
+    except Exception:
+        return True
+
+
 def _resolve_auto_decompose_settings(
     load_config: Callable[[], Any],
 ) -> "tuple[bool, int]":
@@ -1074,6 +1096,8 @@ class GatewayKanbanWatchersMixin:
             out: list[tuple[str, "Optional[object]"]] = []
             for b in boards:
                 slug = b.get("slug") or _kb.DEFAULT_BOARD
+                if not _board_dispatchable(slug):
+                    continue
                 out.append((slug, _tick_once_for_board(slug)))
             return out
 
@@ -1095,6 +1119,8 @@ class GatewayKanbanWatchersMixin:
                 boards = [_kb.read_board_metadata(_kb.DEFAULT_BOARD)]
             for b in boards:
                 slug = b.get("slug") or _kb.DEFAULT_BOARD
+                if not _board_dispatchable(slug):
+                    continue
                 conn = None
                 try:
                     conn = _kb.connect(board=slug)

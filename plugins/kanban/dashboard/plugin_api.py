@@ -1624,7 +1624,7 @@ def specify_task_endpoint(
     # HERMES_KANBAN_BOARD env var — this endpoint runs in FastAPI's
     # threadpool, so two concurrent requests for different boards would
     # otherwise race on the shared env var and cross-write (issue #38323).
-    with kanban_db.scoped_current_board(board or kanban_db.DEFAULT_BOARD):
+    with kanban_db.scoped_current_board(board or kanban_db.get_current_board()):
         # Import lazily so a missing auxiliary client at import time
         # doesn't break plugin load.
         from hermes_cli import kanban_specify  # noqa: WPS433 (intentional)
@@ -2233,7 +2233,7 @@ def decompose_task_endpoint(
     # endpoint runs in FastAPI's threadpool, so mutating the process-global
     # HERMES_KANBAN_BOARD env var would let concurrent requests for
     # different boards race and cross-write (issue #38323).
-    with kanban_db.scoped_current_board(board or kanban_db.DEFAULT_BOARD):
+    with kanban_db.scoped_current_board(board or kanban_db.get_current_board()):
         from hermes_cli import kanban_decompose  # noqa: WPS433 (intentional)
         outcome = kanban_decompose.decompose_task(
             task_id,

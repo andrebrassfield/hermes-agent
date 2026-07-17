@@ -515,6 +515,31 @@ def board_exists(board: Optional[str] = None) -> bool:
     return (d / "board.json").exists() or (d / "kanban.db").exists()
 
 
+def _post_boards_install() -> bool:
+    """True when this install has adopted the boards layout — at least one
+    real board (a ``kanban.db`` or ``board.json``) lives under ``boards/``.
+
+    On such an install the legacy ``<root>/kanban.db`` is historical: it may
+    have been consolidated/archived away, and implicitly recreating it (any
+    reader resolving slug ``default`` — which ``board_exists`` reports as
+    always existing) resurrects an empty shadow board and re-opens the
+    split-brain hazard. ``connect()`` uses this to refuse that implicit
+    resurrection; see the guard there for the operator-intent escape hatch.
+    """
+    root = boards_root()
+    if not root.is_dir():
+        return False
+    try:
+        for child in root.iterdir():
+            if child.is_dir() and (
+                (child / "kanban.db").exists() or (child / "board.json").exists()
+            ):
+                return True
+    except OSError:
+        return False
+    return False
+
+
 def kanban_db_path(board: Optional[str] = None) -> Path:
     """Return the path to the ``kanban.db`` for ``board``.
 
@@ -1708,6 +1733,41 @@ def connect(
         path = db_path
     else:
         path = kanban_db_path(board=board)
+        if (
+            not os.environ.get("HERMES_KANBAN_DB", "").strip()
+            and path == kanban_home() / "kanban.db"
+            and not path.exists()
+            and _post_boards_install()
+        ):
+            # Legacy-path resurrection guard: when the operator has actively
+            # switched the current board AWAY from ``default`` (the on-disk
+            # current-board file names another board) and the legacy
+            # ``<root>/kanban.db`` is gone (consolidated/archived), a caller
+            # resolving slug ``default`` is almost certainly a stray-fallback
+            # bug — lazily creating an empty DB here silently forks the board
+            # (observed live 2026-07-17: a reader recreated the file ~23s
+            # after it was archived). Fail loud instead. Deliberate flows are
+            # unaffected: no current-board file (fresh/boards-less installs,
+            # ``--board``-driven CLI usage) keeps lazy creation, a current
+            # file naming ``default`` keeps it, and ``HERMES_KANBAN_DB`` /
+            # explicit ``db_path`` (``init_db``'s path — `hermes kanban
+            # init`) bypass the guard entirely.
+            cur_slug = None
+            try:
+                cur = current_board_path()
+                if cur.exists():
+                    cur_slug = cur.read_text(encoding="utf-8").strip() or None
+            except OSError:
+                pass
+            if cur_slug is not None and cur_slug != DEFAULT_BOARD:
+                raise FileNotFoundError(
+                    "kanban board 'default' has no DB on this boards-layout "
+                    f"install ({path} is absent) and the current board is "
+                    f"{cur_slug!r}; refusing to recreate the legacy file "
+                    "implicitly. Use the current board, pin HERMES_KANBAN_DB, "
+                    "or run 'hermes kanban boards switch default' to opt "
+                    "back in."
+                )
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Fast path: once THIS process has initialized this path, the expensive
@@ -2712,6 +2772,30 @@ def create_task(
                         "goal_mode": bool(goal_mode) or None,
                     },
                 )
+                if initial_status == "blocked":
+                    # A task parked in ``blocked`` at creation is a human-ops
+                    # hold (see the status comment above), not a dependency
+                    # wait. ``recompute_ready`` decides stickiness from the
+                    # latest ``blocked``/``unblocked`` EVENT (#28712), so
+                    # without this event a created-blocked task auto-promotes
+                    # on the next dispatcher tick and the HITL gate silently
+                    # fails open. Mirror ``block_task``'s truly-blocked shape:
+                    # ``needs_input`` kind + a sticky ``blocked`` event.
+                    conn.execute(
+                        "UPDATE tasks SET block_kind = ? WHERE id = ?",
+                        ("needs_input", task_id),
+                    )
+                    _append_event(
+                        conn,
+                        task_id,
+                        "blocked",
+                        {
+                            "reason": "created with initial_status=blocked "
+                                      "(human-ops hold)",
+                            "kind": "needs_input",
+                            "recurrences": 0,
+                        },
+                    )
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:

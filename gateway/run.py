@@ -6769,7 +6769,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             pass
         try:
             from gateway.status import write_runtime_status
-            write_runtime_status(gateway_state="starting", exit_reason=None)
+            # reset_platforms=True purges stale platform entries from the
+            # previous run (e.g. a platform disabled in config but still
+            # present in the on-disk state file).  Adapters re-add their
+            # own entries as they connect below.
+            write_runtime_status(gateway_state="starting", exit_reason=None, reset_platforms=True)
         except Exception:
             pass
 

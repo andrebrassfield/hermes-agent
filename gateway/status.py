@@ -805,12 +805,23 @@ def write_runtime_status(
     error_code: Any = _UNSET,
     error_message: Any = _UNSET,
     served_profiles: Any = _UNSET,
+    reset_platforms: bool = False,
 ) -> None:
-    """Persist gateway runtime health information for diagnostics/status."""
+    """Persist gateway runtime health information for diagnostics/status.
+
+    When ``reset_platforms`` is True, the ``platforms`` dict is cleared before
+    any other updates are applied.  This is used at gateway startup to purge
+    stale platform entries from a previous run (e.g. a platform that was
+    disabled in config but still present in the on-disk state file).  Individual
+    platform adapters subsequently re-add their own entries as they connect.
+    """
     path = _get_runtime_status_path()
     payload = _read_json_file(path) or _build_runtime_status_record()
     current_record = _build_pid_record()
-    payload.setdefault("platforms", {})
+    if reset_platforms:
+        payload["platforms"] = {}
+    else:
+        payload.setdefault("platforms", {})
     payload["kind"] = current_record["kind"]
     payload["pid"] = current_record["pid"]
     payload["argv"] = current_record["argv"]

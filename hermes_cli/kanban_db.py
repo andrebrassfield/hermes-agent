@@ -94,6 +94,7 @@ from toolsets import get_toolset_names
 
 from hermes_cli import kanban_gate3 as _gate3
 from hermes_cli import kanban_gate4 as _gate4
+from hermes_cli import kanban_brain_gate as _brain_gate
 
 _log = logging.getLogger(__name__)
 
@@ -1937,6 +1938,15 @@ def init_db(
         # Best-effort — if the mode file can't be created here, the
         # first complete_task call will surface the Gate4ConfigError
         # at eval time. Do not raise from init_db.
+        pass
+    # Ensure the brain-gate (Gate 1, Brain-write closure) mode file
+    # exists. Same lazy-import, best-effort pattern as Gates 3/4.
+    try:
+        from hermes_cli import kanban_brain_gate as _bg
+        _bg.ensure_brain_gate_mode_file()
+    except Exception:
+        # Best-effort — the first complete_task call will surface the
+        # BrainGateConfigError at eval time. Do not raise from init_db.
         pass
     return path
 
@@ -4370,6 +4380,22 @@ def complete_task(
             workspace_path=_ws_path,
             declared_repo=None,
         )
+        # Brain gate (Gate 1 of the Brain-write closure) runs on every
+        # Gate-4 block-path eval regardless of Gate 3's or Gate 4's mode —
+        # it self-gates internally via kanban_brain_gate_effective_mode()
+        # (shadow logs, enforce raises). Gating it on another gate's mode
+        # file would make its shadow ledger silently empty.
+        declared_commit = None
+        _dc_match = re.search(r"[a-f0-9]{40}", summary or "")
+        if _dc_match:
+            declared_commit = _dc_match.group(0)
+        _brain_gate.integrate_with_complete_task(
+            completion_summary=summary,
+            artifacts=(metadata or {}).get("artifacts"),
+            card_paths=[],
+            declared_commit=declared_commit,
+        )
+
         if _g4_mode == "enforce":
             raise _gate4.Gate4ConfigError(
                 f"Gate 4: dirty tree — {_g4_verdict.reason}"

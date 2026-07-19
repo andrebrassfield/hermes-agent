@@ -1299,6 +1299,24 @@ class PluginManager:
             self._aux_tasks.clear()
             self._slack_action_handlers.clear()
             self._context_engine = None
+            # Also invalidate the platform_registry memo so the next
+            # ``plugin_entries()`` call re-iterates and picks up any new /
+            # removed platform adapter registered by this force pass.
+            # Without this, a force-rediscover would silently leave the
+            # memoized plugin entries stale — every subsequent
+            # ``load_gateway_config()`` call (e.g. in a cron worker) would
+            # see the pre-force platform set.
+            try:
+                from gateway.platform_registry import platform_registry
+
+                platform_registry.invalidate_plugin_entries_cache()
+            except Exception as e:
+                # Don't let an unrelated platform_registry import failure
+                # block plugin discovery; just log and proceed.
+                logger.warning(
+                    "Could not invalidate platform_registry cache on force: %s",
+                    e,
+                )
         # Set the flag up front as a re-entrancy guard (a plugin's register()
         # can transitively trigger discovery again), but reset it if the sweep
         # raises so a failed scan is NOT cached as "discovered with an empty

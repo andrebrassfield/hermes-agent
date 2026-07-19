@@ -484,6 +484,119 @@ class TestPluginDiscovery:
         assert mgr._aux_tasks == {}
         assert mgr._slack_action_handlers == []
 
+    def test_force_rediscover_invalidates_platform_registry_memo(self, monkeypatch):
+        """force=True must also invalidate the platform_registry's plugin_entries() memo.
+
+        Regression: ``discover_and_load(force=True)`` was clearing the
+        PluginManager state but leaving ``platform_registry._plugin_entries_cache``
+        populated with the pre-force platform set. The next
+        ``load_gateway_config()`` call (which goes through ``plugin_entries()``)
+        would return the stale memoized list instead of re-iterating the
+        (possibly newly-populated) platform_registry. Without this
+        invalidation, every cron worker that hit ``force=True`` to pick up
+        a new bundled platform plugin would silently continue to ship the
+        old platform set to the gateway.
+
+        The fix wires ``platform_registry.invalidate_plugin_entries_cache()``
+        into the force=True clear block. This test asserts the wiring is
+        in place and works end-to-end.
+        """
+        from gateway.platform_registry import PlatformEntry, PlatformRegistry
+
+        # Fresh registry so we don't collide with the module-level singleton
+        fresh = PlatformRegistry()
+
+        # Seed it with a single entry and prime the memo
+        seed_entry = PlatformEntry(
+            name="seeded-platform",
+            label="Seeded",
+            source="plugin",
+            adapter_factory=lambda cfg: None,
+            check_fn=lambda: True,
+        )
+        fresh.register(seed_entry)
+        prime_names = [e.name for e in fresh.plugin_entries()]
+        assert "seeded-platform" in prime_names
+        assert fresh._plugin_entries_cache is not None
+
+        # Stub out the module-level platform_registry that plugins.py imports
+        # so this test controls the registry state it observes.
+        fake_registry = MagicMock()
+        fake_registry.invalidate_plugin_entries_cache = MagicMock()
+        monkeypatch.setattr(
+            "gateway.platform_registry.platform_registry", fake_registry
+        )
+
+        mgr = PluginManager()
+        mgr._discovered = True
+        monkeypatch.setattr(PluginManager, "_discover_and_load_inner", lambda self_inner: None)
+
+        mgr.discover_and_load(force=True)
+
+        fake_registry.invalidate_plugin_entries_cache.assert_called_once()
+
+    def test_force_rediscover_actually_reiterates_platform_registry(self, monkeypatch):
+        """End-to-end: force=True + an entry added to the live registry between
+        force and the next plugin_entries() call must be visible.
+
+        Without the wiring, plugin_entries() would keep returning the
+        pre-force memoized list. With the wiring, the next call re-iterates.
+        """
+        from gateway.platform_registry import PlatformEntry, PlatformRegistry
+
+        live = PlatformRegistry()
+        # Pre-seed so plugin_entries() can memoize
+        live.register(
+            PlatformEntry(
+                name="old-platform",
+                label="Old",
+                source="plugin",
+                adapter_factory=lambda cfg: None,
+                check_fn=lambda: True,
+            )
+        )
+        # Prime the memo
+        pre = [e.name for e in live.plugin_entries()]
+        assert "old-platform" in pre
+        assert live._plugin_entries_cache is not None
+
+        # Point the module-level singleton at our `live` registry so the
+        # plugins.py lazy import sees it
+        monkeypatch.setattr(
+            "gateway.platform_registry.platform_registry", live
+        )
+
+        mgr = PluginManager()
+        mgr._discovered = True
+        # Stub the inner sweep so no on-disk plugins pollute the test
+        monkeypatch.setattr(PluginManager, "_discover_and_load_inner", lambda self_inner: None)
+
+        # Simulate a freshly-enabled platform plugin registering AFTER the
+        # memo was primed (so the memo, if not invalidated, would hide it)
+        live.register_deferred(
+            "new-platform",
+            lambda: live.register(
+                PlatformEntry(
+                    name="new-platform",
+                    label="New",
+                    source="plugin",
+                    adapter_factory=lambda cfg: None,
+                    check_fn=lambda: True,
+                )
+            ),
+        )
+
+        mgr.discover_and_load(force=True)
+
+        # Force-rediscover should have invalidated the memo. Next call
+        # must re-iterate via _resolve_all() and surface the new entry.
+        post = [e.name for e in live.plugin_entries()]
+        assert "new-platform" in post, (
+            "force=True did not invalidate plugin_entries() memo — "
+            "the new platform is missing from the post-force list"
+        )
+        assert "old-platform" in post
+
 
 # ── TestPluginLoading ──────────────────────────────────────────────────────
 

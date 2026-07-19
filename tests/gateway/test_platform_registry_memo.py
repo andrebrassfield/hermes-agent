@@ -109,6 +109,92 @@ def test_unregister_invalidates_memo():
     assert registry._plugin_entries_cache is None
 
 
+def test_invalidate_plugin_entries_cache_method():
+    """
+    The public ``invalidate_plugin_entries_cache()`` method clears the
+    memo so the next ``plugin_entries()`` call re-iterates _entries.
+
+    This is the hook that ``hermes_cli.plugins.discover_and_load(force=True)``
+    calls — without it, a force-rediscover of the plugin manager would
+    leave the platform_registry memo stale, and every subsequent
+    ``load_gateway_config()`` call (e.g. from a cron worker) would see
+    the pre-force platform set until something explicitly called
+    ``register()`` / ``unregister()`` to invalidate it organically.
+    """
+    from gateway.platform_registry import PlatformEntry, PlatformRegistry
+
+    registry = PlatformRegistry()
+
+    # Prime the cache via register() so the memo is populated
+    registry.register(
+        PlatformEntry(
+            name="initial-platform",
+            label="Initial",
+            source="plugin",
+            adapter_factory=lambda cfg: None,
+            check_fn=lambda: True,
+        )
+    )
+    _ = registry.plugin_entries()
+    assert registry._plugin_entries_cache is not None
+
+    # Public method should clear it
+    registry.invalidate_plugin_entries_cache()
+    assert registry._plugin_entries_cache is None
+
+    # And calling it again on a cold cache is a safe no-op
+    registry.invalidate_plugin_entries_cache()
+    assert registry._plugin_entries_cache is None
+
+
+def test_invalidate_plugin_entries_cache_picks_up_new_entries():
+    """
+    After invalidation, the next ``plugin_entries()`` call must re-iterate
+    and reflect any entries added between the original prime and the
+    invalidation. (Without the public invalidate method, a force pass
+    would have no way to clear the memo short of touching register().)
+    """
+    from gateway.platform_registry import PlatformEntry, PlatformRegistry
+
+    registry = PlatformRegistry()
+
+    # Prime with one entry
+    registry.register(
+        PlatformEntry(
+            name="alpha",
+            label="Alpha",
+            source="plugin",
+            adapter_factory=lambda cfg: None,
+            check_fn=lambda: True,
+        )
+    )
+    prime_names = [e.name for e in registry.plugin_entries()]
+    assert prime_names == ["alpha"]
+
+    # External force pass invalidates the cache
+    registry.invalidate_plugin_entries_cache()
+
+    # A new entry registers AFTER invalidation (e.g. a freshly enabled
+    # platform plugin). register() also invalidates, but we want to
+    # verify the public invalidate is sufficient on its own.
+    registry.register_deferred(
+        "beta", lambda: registry.register(
+            PlatformEntry(
+                name="beta",
+                label="Beta",
+                source="plugin",
+                adapter_factory=lambda cfg: None,
+                check_fn=lambda: True,
+            )
+        )
+    )
+
+    # Next call re-iterates and includes beta (via _resolve_all) plus alpha
+    names = [e.name for e in registry.plugin_entries()]
+    assert "alpha" in names
+    assert "beta" in names
+
+
 def test_plugin_entries_returns_snapshot_not_live_view():
     """
     Each plugin_entries() call returns a fresh list (snapshot), so callers

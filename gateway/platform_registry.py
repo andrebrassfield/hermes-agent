@@ -290,6 +290,21 @@ class PlatformRegistry:
             ]
         return list(self._plugin_entries_cache)
 
+    def invalidate_plugin_entries_cache(self) -> None:
+        """Clear the memoized ``plugin_entries()`` result.
+
+        Use this when an external force-rediscover path (e.g. ``hermes
+        plugins discover --force``) clears the plugin manager state and
+        wants the next ``plugin_entries()`` call to re-iterate the
+        (possibly changed) ``_entries`` / ``_deferred`` sets without
+        waiting for a new ``register()`` / ``unregister()`` to happen.
+
+        Safe to call when no cache exists yet (no-op).
+        """
+        if self._plugin_entries_cache is not None:
+            logger.debug("Invalidated plugin_entries() memo")
+        self._plugin_entries_cache = None
+
     def is_registered(self, name: str) -> bool:
         # A deferred (not-yet-imported) platform still counts as registered --
         # the loader will materialize it on first real use.  This keeps cheap

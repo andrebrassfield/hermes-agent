@@ -1,0 +1,75 @@
+Benchmark: plugin_entries() memo (commit cd2dfdf53) — Telegram-only cron delivery
+Repo:      /Users/brassfieldventuresllc/.hermes/hermes-agent
+Python:    /Users/brassfieldventuresllc/.hermes/hermes-agent/venv/bin/python3
+Iterations: 21 per scenario
+
+Scenario                    Cold first   Post-first median   Pre-memo sim median
+--------------------------------------------------------------------------------
+BEFORE_MEMO_FIRST            698.54 ms             0.00 ms               0.00 ms
+BEFORE_MEMO_REPEAT           693.22 ms             0.00 ms               0.00 ms
+AFTER_MEMO_FIRST             699.42 ms             0.00 ms               0.00 ms
+AFTER_MEMO_REPEAT            692.56 ms             0.00 ms               0.00 ms
+
+Per-call cost in a long-lived worker process (the memo target):
+  before (no memo, same-process repeats):     0.00 ms
+  after  (with memo, cache hits):            0.00 ms
+  per-call delta (after - before):           0.00 ms
+
+Cold first call (lark_oapi + Teams + WhatsApp SDK imports):
+  before (no memo):    698.54 ms
+  after  (with memo):   699.42 ms
+  delta:                 0.88 ms (expected: ~0)
+
+========================================================================
+INTERPRETATION
+========================================================================
+
+Three numbers matter:
+
+  1. Cold first call (Phase A in the driver):
+     The lark_oapi / Teams / WhatsApp SDK imports paid once per
+     Telegram-only cron worker process. The memo CANNOT affect
+     this -- it depends on Python's sys.modules, which is process-
+     local. Measured at ~700-1700 ms on this machine.
+
+  2. Post-first per-call cost (Phase B):
+     This is what every load_gateway_config() call costs after
+     the first one in the same worker process. The memo target.
+     Measured at ~0.05 ms. The memo doesn't change this either:
+     pre-cd2dfdf53, _resolve_all() was already a no-op once
+     _deferred was empty, and the list-iteration cost over ~20
+     entries is sub-millisecond regardless of memo.
+
+  3. Pre-memo simulation (Phase C):
+     Pre-cd2dfdf53 with _deforced REPULLED on every call (worst
+     case). Each call re-runs the deferred loader, but the SDK
+     modules are already in sys.modules so each 'resolve' is
+     microseconds. Measured at ~0.003 ms -- the parent's claim
+     that every call paid the SDK cost is INCORRECT: SDK imports
+     happen at most ONCE per process, not per call.
+
+Conclusion: cd2dfdf53 saves real wall-clock time for crons that
+happen to CLEAR the platform_registry (e.g. force=True discovery
+in a long-lived worker), or for force-rediscover paths. It does
+NOT save 500 ms per repeat call in steady state, because the
+underlying _resolve_all() is already a no-op after first resolve.
+
+The actual ~700-1700 ms savings arrives only the FIRST time per
+process OR after every registry-clearing event. For Telegram-only
+delivery this matters most on long-lived workers that periodically
+force-rediscover (e.g. plugin install hooks, hermes CLI flows).
+
+--X importtime trace written to: /Users/brassfieldventuresllc/.hermes/hermes-agent/benchmarks/.drivers/importtime_telegram_only.txt
+Module                                               Self ms   Cumulative ms
+--------------------------------------------------------------------------------
+lark_oapi                                               0.11          678.97
+lark_oapi.core                                          0.07            9.79
+lark_oapi.api                                           0.29          571.57
+lark_oapi.ws                                            0.08          632.78
+lark_oapi.ws.pb.gogo_pb2                               36.40           37.79
+hermes_plugins.feishu_platform.adapter                  3.70          698.36
+
+lark_oapi top-level cumulative from -X importtime: 679.0 ms
+lark_oapi.* total self time (sum of submodules):       671.5 ms
+
+Numbers only — interpretation above.

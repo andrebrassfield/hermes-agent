@@ -181,6 +181,15 @@ class PlatformRegistry:
         # actually asks for that platform (gateway start, cron delivery,
         # `hermes setup`/`gateway status`, send_message).
         self._deferred: dict[str, Callable[[], None]] = {}
+        # Memoized result of plugin_entries() — populated once after the first
+        # _resolve_all() call.  Invalidated whenever a new platform registers
+        # (so fresh discovery via force=True carries the new entries).  Keeps
+        # lark_oapi and other heavy SDKs out of Telegram-only cron workers:
+        # without this cache, every load_gateway_config() call from a cron tick
+        # would call plugin_entries() -> _resolve_all() and pay ~1.5 s of
+        # Feishu/Teams/WhatsApp SDK import time even when no non-Telegram
+        # platform is configured.
+        self._plugin_entries_cache: Optional[list[PlatformEntry]] = None
 
     # -- deferred loading ----------------------------------------------------
 
@@ -246,10 +255,13 @@ class PlatformRegistry:
             )
         self._entries[entry.name] = entry
         logger.debug("Registered platform adapter: %s (%s)", entry.name, entry.source)
+        # Invalidate the plugin_entries() memo so the next call re-iterates.
+        self._plugin_entries_cache = None
 
     def unregister(self, name: str) -> bool:
         """Remove a platform entry.  Returns True if it existed."""
         self._deferred.pop(name, None)
+        self._plugin_entries_cache = None  # invalidate memo
         return self._entries.pop(name, None) is not None
 
     def get(self, name: str) -> Optional[PlatformEntry]:
@@ -264,9 +276,19 @@ class PlatformRegistry:
         return list(self._entries.values())
 
     def plugin_entries(self) -> list[PlatformEntry]:
-        """Return only plugin-registered platform entries."""
-        self._resolve_all()
-        return [e for e in self._entries.values() if e.source == "plugin"]
+        """Return only plugin-registered platform entries.
+
+        Result is memoized after the first ``_resolve_all()`` call, so
+        repeated iteration (e.g. multiple ``load_gateway_config()`` calls
+        in a single cron worker process) does not re-import platform SDKs.
+        The memo is invalidated whenever a new platform registers.
+        """
+        if self._plugin_entries_cache is None:
+            self._resolve_all()
+            self._plugin_entries_cache = [
+                e for e in self._entries.values() if e.source == "plugin"
+            ]
+        return list(self._plugin_entries_cache)
 
     def is_registered(self, name: str) -> bool:
         # A deferred (not-yet-imported) platform still counts as registered --

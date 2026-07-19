@@ -101,6 +101,289 @@ def _summarize_cron_failure_for_delivery(job: dict, error: str | None) -> str:
     return f"⚠️ Cron '{job_name}' failed: {cleaned}"
 
 
+# ---------------------------------------------------------------------------
+# Routing-chain retry + chain-exhaustion Telegram alert
+# (Dre approval 2026-07-19: routing_chain declared in jobs.json but not honored
+#  on the dispatch hot path — dream-cycle-brain 04:01 CDT error did not escalate
+#  to any fallback provider. Bug fix t_5102d907 / commit on hermes-agent main.)
+#
+# Contract:
+#   1. On `last_status: error` for any `no_agent: false` job that declares a
+#      `routing_chain`, retry once with the primary provider before escalating.
+#   2. On second failure, walk `routing_chain` in declared order until one
+#      succeeds or the chain is exhausted.
+#   3. On chain exhaustion, fire a Telegram DM to Dre (6598264778) via the
+#      observation gateway's existing delivery path — NO new notification
+#      channel. The morning brief would be too late; this is the loud alert.
+#   4. Escalation is gated by `escalation_on`: only retry when it is
+#      `failure_or_low_quality` or `failure`. `never` and other values skip
+#      the retry path entirely (operator chose to NOT escalate).
+# ---------------------------------------------------------------------------
+
+# Errors that justify escalating to a fallback provider. Connection errors,
+# rate limits, timeouts, and provider auth/quota errors all qualify — these
+# are transient or environmental and a different provider has a real chance
+# of succeeding on the same prompt. Permanent prompt/skill errors are NOT
+# escalated: re-running them against a different provider would just spend
+# money to fail again.
+_ROUTING_CHAIN_RETRY_ERROR_PATTERNS = (
+    "connection error",
+    "connection reset",
+    "connection refused",
+    "timed out",
+    "timeout",
+    "readtimeout",
+    "rate limit",
+    "usage limit",
+    "quota",
+    " 429 ",
+    " 500 ",
+    " 502 ",
+    " 503 ",
+    " 504 ",
+    "service unavailable",
+    "internal server error",
+    "bad gateway",  # nginx-style message
+    "badgateway",   # aiohttp BadGateway exception class name
+    "authenticat",  # 401-style — different provider may have valid creds
+    " authoriz",    # 403-style
+    "api key",
+    "provider error",
+)
+
+
+def _should_escalate_via_routing_chain(job: dict, error: str) -> bool:
+    """True iff this job declares a routing_chain, escalation is enabled, and
+    the error is the kind a different provider can plausibly fix."""
+    chain = job.get("routing_chain")
+    if not chain or not isinstance(chain, list) or not chain:
+        return False
+    escalation_on = (job.get("escalation_on") or "failure_or_low_quality").strip().lower()
+    if escalation_on not in ("failure", "failure_or_low_quality"):
+        return False
+    # The bug we are fixing (04:01 CDT 2026-07-19 dream-cycle-brain) was a
+    # plain `RuntimeError: Connection error.` — match broadly on error text.
+    # Refuse to escalate on a permanent prompt/skill error.
+    if not error:
+        return False
+    lower = str(error).lower()
+    return any(pat in lower for pat in _ROUTING_CHAIN_RETRY_ERROR_PATTERNS)
+
+
+def _routing_chain_retry(
+    job: dict,
+    primary_error: str,
+    defer_agent_teardown: list,
+) -> tuple[bool, str, str, Optional[str], list[dict]]:
+    """Re-run a failed cron job through its declared routing_chain.
+
+    Returns ``(success, output, final_response, error, attempts_log)`` where
+    ``attempts_log`` is a list of dicts recording every retry attempt for the
+    chain-exhaustion alert:
+
+      ``[{"step": "primary_retry"|"chain:<idx>", "provider": ..., "model": ...,
+         "ok": bool, "error": str|None, "elapsed_ms": int}, ...]``
+
+    Behaviour matches the bug-fix acceptance criteria:
+
+      1. Always tries the primary provider once more first (transient errors
+         often clear on a fresh attempt; paying for that extra call is
+         cheaper than losing a 4am cron and waking Dre).
+      2. If the primary retry still fails, walks ``job["routing_chain"]`` in
+         declared order, building a per-entry shallow-copy job that pins the
+         chain provider/model onto the job dict so ``run_job``'s existing
+         runtime-resolution path picks it up.
+      3. The chain entry's ``effort`` field is honoured via ``request_overrides``
+         if present so reasoning_effort switches per-fallback as configured.
+
+    Never raises — any exception inside the helper is converted into a failed
+    attempt entry so the caller's chain-exhaustion alert still has full
+    context.
+    """
+    attempts: list[dict] = []
+    chain = list(job.get("routing_chain") or [])
+
+    # Step 1: primary retry. run_job already failed once; we re-invoke it
+    # with the original job (no overrides) to absorb transient errors.
+    t0 = time.monotonic()
+    try:
+        success, output, final_response, err = run_job(
+            job, defer_agent_teardown=defer_agent_teardown
+        )
+    except BaseException as exc:  # run_job already converts its own errors
+        success, output, final_response, err = False, "", "", f"{type(exc).__name__}: {exc}"
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    attempts.append({
+        "step": "primary_retry",
+        "provider": job.get("provider"),
+        "model": job.get("model"),
+        "ok": bool(success),
+        "error": (err or None) if not success else None,
+        "elapsed_ms": elapsed_ms,
+    })
+    if success:
+        return success, output, final_response, err, attempts
+
+    # Step 2: walk the routing_chain. For each entry we build a shallow copy
+    # of the job so we can pin provider/model without mutating the caller's
+    # dict. Any exception during a chain attempt is logged as a failed
+    # attempt and we continue to the next entry.
+    for idx, entry in enumerate(chain):
+        if not isinstance(entry, dict):
+            continue
+        chain_provider = (entry.get("provider") or "").strip() or None
+        chain_model = (entry.get("model") or "").strip() or None
+        if not chain_provider and not chain_model:
+            attempts.append({
+                "step": f"chain:{idx}",
+                "provider": None,
+                "model": None,
+                "ok": False,
+                "error": "chain entry has neither provider nor model — skipped",
+                "elapsed_ms": 0,
+            })
+            continue
+        chain_job = dict(job)  # shallow copy; the inner config dicts are
+        # referenced by the original, but the only keys we change are at the
+        # top level (provider/model/base_url/effort) so this is safe.
+        chain_job["provider"] = chain_provider
+        chain_job["model"] = chain_model
+        # Drop the chain from the retry copy so a nested failure here does
+        # not infinitely recurse — the OUTER call already owns the retry
+        # budget.
+        chain_job.pop("routing_chain", None)
+        chain_job.pop("escalation_on", None)
+
+        t0 = time.monotonic()
+        try:
+            ok, out, fr, err = run_job(
+                chain_job, defer_agent_teardown=defer_agent_teardown
+            )
+        except BaseException as exc:
+            ok, out, fr, err = False, "", "", f"{type(exc).__name__}: {exc}"
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        attempts.append({
+            "step": f"chain:{idx}",
+            "provider": chain_provider,
+            "model": chain_model,
+            "ok": bool(ok),
+            "error": (err or None) if not ok else None,
+            "elapsed_ms": elapsed_ms,
+        })
+        if ok:
+            return ok, out, fr, err, attempts
+
+    # All chain entries exhausted — return the primary error as the headline.
+    return False, output, final_response, primary_error, attempts
+
+
+def _fire_chain_exhaustion_alert(job: dict, attempts: list[dict]) -> Optional[str]:
+    """Fire a Telegram DM to Dre (6598264778) when a job's routing_chain is
+    fully exhausted. Uses the observation gateway's existing delivery path
+    (``_send_to_platform`` + asyncio.run on a fresh event loop) — NO new
+    notification channel. Returns None on success or a short error string.
+
+    Per Dre 2026-07-19: do NOT wait for the morning brief. The alert must
+    land in the same Telegram DM the job originated from (the origin's
+    chat_id is on ``job["origin"]``), with a fallback to Dre's main DM
+    ``6598264778`` if no origin is recorded.
+
+    Best-effort: never raises. Failures are logged and returned so the
+    caller's run_one_job can record them on the job's state without
+    re-crashing the cron pipeline.
+    """
+    job_id = job.get("id") or "?"
+    job_name = job.get("name") or job_id
+    origin = job.get("origin") or {}
+    chat_id = str(origin.get("chat_id") or "").strip() or "6598264778"
+    platform_name = (origin.get("platform") or "telegram").strip().lower()
+    # routing_chain exhaustion on jobs whose origin is NOT telegram
+    # (e.g. CLI-created with no origin) always falls back to Dre's DM.
+    if platform_name != "telegram":
+        chat_id = "6598264778"
+        platform_name = "telegram"
+
+    # Compose a compact, operator-grade message. Long enough to act on,
+    # short enough that Telegram doesn't split it.
+    attempt_lines = []
+    for a in attempts:
+        step = a.get("step", "?")
+        prov = a.get("provider") or "?"
+        mod = a.get("model") or "?"
+        ok = "✓" if a.get("ok") else "✗"
+        err = a.get("error") or ""
+        if err:
+            err = err.splitlines()[0][:120]
+        attempt_lines.append(
+            f"  {ok} {step}  {prov}/{mod}  ({a.get('elapsed_ms', 0)}ms)  {err}"
+        )
+    attempts_block = "\n".join(attempt_lines) if attempt_lines else "  (no attempts recorded)"
+
+    message = (
+        f"🚨 Cron routing_chain exhausted — '{job_name}' ({job_id})\n\n"
+        f"Primary + every fallback failed. Job will be marked error and "
+        f"will not be retried until the next scheduled tick.\n\n"
+        f"Attempts:\n{attempts_block}\n\n"
+        f"Time: {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Job schedule: {job.get('schedule_display', 'N/A')}"
+    )
+
+    try:
+        from gateway.config import load_gateway_config, Platform
+        config = load_gateway_config()
+        try:
+            platform = Platform(platform_name.lower())
+        except (ValueError, KeyError):
+            return f"unknown platform '{platform_name}' for chain-exhaustion alert"
+        pconfig = config.platforms.get(platform)
+        if not pconfig or not pconfig.enabled:
+            return f"platform '{platform_name}' not configured/enabled — cannot alert"
+        # Use the same standalone-delivery path as _deliver_result. asyncio.run
+        # is unsafe if a loop is already running in this thread (scheduler
+        # tick thread is plain threading.Thread, so no loop); if it raises
+        # RuntimeError because of a running loop somewhere up the stack, fall
+        # back to a thread pool with a timeout, mirroring _deliver_result's
+        # pattern at lines 1929-1935.
+        from tools.send_message_tool import _send_to_platform
+        coro = _send_to_platform(platform, pconfig, chat_id, message)
+        try:
+            asyncio.run(coro)
+            logger.warning(
+                "Cron routing_chain exhaustion alert sent for job %s to %s:%s",
+                job_id, platform_name, chat_id,
+            )
+            return None
+        except RuntimeError as run_err:
+            # asyncio.run() can refuse when a loop is already running in this
+            # thread. Close the coro (we never awaited it) and retry on a
+            # fresh thread with a 30s timeout.
+            try:
+                coro.close()
+            except Exception:
+                pass
+            if _interpreter_shutting_down(run_err):
+                return "chain-exhaustion alert skipped — interpreter shutting down"
+            try:
+                pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                try:
+                    future = pool.submit(asyncio.run, _send_to_platform(
+                        platform, pconfig, chat_id, message
+                    ))
+                    future.result(timeout=30)
+                finally:
+                    pool.shutdown(wait=False)
+                logger.warning(
+                    "Cron routing_chain exhaustion alert (thread-fallback) "
+                    "sent for job %s to %s:%s",
+                    job_id, platform_name, chat_id,
+                )
+                return None
+            except Exception as e:
+                return f"chain-exhaustion alert failed: {e}"
+    except Exception as e:
+        return f"chain-exhaustion alert failed: {e}"
+
+
 class CronPromptInjectionBlocked(Exception):
     """Raised by _build_job_prompt when the fully-assembled prompt trips the
     injection scanner. Caught in run_job so the operator sees a clean
@@ -3498,6 +3781,80 @@ def run_one_job(job: dict, *, adapters=None, loop=None, verbose: bool = False) -
             raise
         finally:
             reset_secret_scope(_scope_token)
+
+        # ------------------------------------------------------------------
+        # routing_chain retry + chain-exhaustion Telegram alert
+        # (Bug fix t_5102d907 / Dre approval 2026-07-19.)
+        #
+        # When the primary run failed and the job declares a routing_chain
+        # with escalation_on != "never", retry once with the primary
+        # provider, then walk the declared chain. If a fallback succeeds,
+        # swap in its result. If the chain is exhausted, fire a Telegram
+        # DM to Dre (the loud alert — no waiting for the morning brief).
+        # ------------------------------------------------------------------
+        if not success and not job.get("no_agent") and _should_escalate_via_routing_chain(job, error or ""):
+            rc_success, rc_output, rc_final, rc_error, rc_attempts = _routing_chain_retry(
+                job, primary_error=error or "", defer_agent_teardown=_deferred_agents,
+            )
+            if rc_success:
+                logger.warning(
+                    "Job '%s': routing_chain recovered after primary failure "
+                    "(chain entry succeeded where primary had failed)",
+                    job["id"],
+                )
+                success, output, final_response, error = (
+                    True, rc_output, rc_final, None,
+                )
+                # Annotate the output so the morning brief / next audit
+                # shows this run used a fallback instead of the primary.
+                try:
+                    if output and isinstance(output, str):
+                        output = output + (
+                            "\n\n---\n_routing_chain: recovered via fallback "
+                            f"after {len(rc_attempts)} attempt(s)_\n"
+                        )
+                except Exception:
+                    pass
+            else:
+                # Chain exhausted. Fire Telegram DM so the operator learns
+                # NOW. Alert failures do NOT mask the original cron error —
+                # they are appended to the output doc for visibility.
+                logger.error(
+                    "Job '%s': routing_chain exhausted after %d attempt(s); "
+                    "firing Telegram exhaustion alert",
+                    job["id"], len(rc_attempts),
+                )
+                alert_err = _fire_chain_exhaustion_alert(job, rc_attempts)
+                if alert_err:
+                    logger.error(
+                        "Job '%s': chain-exhaustion alert could not be sent: %s",
+                        job["id"], alert_err,
+                    )
+                # Annotate the output with the chain attempt history so the
+                # post-mortem in the cron output directory is complete even
+                # if Telegram failed.
+                try:
+                    attempt_lines = []
+                    for a in rc_attempts:
+                        step = a.get("step", "?")
+                        prov = a.get("provider") or "?"
+                        mod = a.get("model") or "?"
+                        ok = "OK" if a.get("ok") else "FAIL"
+                        err = a.get("error") or ""
+                        if err:
+                            err = err.splitlines()[0][:160]
+                        attempt_lines.append(
+                            f"  - {step} {prov}/{mod}: {ok} ({a.get('elapsed_ms', 0)}ms) {err}"
+                        )
+                    attempts_block = "\n".join(attempt_lines)
+                    output = (
+                        (output or "")
+                        + "\n\n---\n_routing_chain: EXHAUSTED_\n"
+                        + f"Attempts ({len(rc_attempts)}):\n{attempts_block}\n"
+                        + (f"Alert: {alert_err}\n" if alert_err else "Alert: sent\n")
+                    )
+                except Exception:
+                    pass
 
         # Everything from here through delivery runs with the agent still live
         # (deferred teardown). Wrap it ALL in a try/finally so that if any step

@@ -9,7 +9,6 @@ export const ALWAYS_EXCLUDED = new Set([
   'node_modules',
   'bower_components',
   '.venv',
-  'venv',
   'env',
   '__pycache__',
   '.mypy_cache',

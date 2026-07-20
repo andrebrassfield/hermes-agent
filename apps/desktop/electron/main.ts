@@ -2308,8 +2308,8 @@ function repairMacUpdaterHelper(updater) {
 // `hermes.exe` holds open; on POSIX it's never mandatory-locked.
 function venvHermesShimPath(updateRoot) {
   return IS_WINDOWS
-    ? path.join(updateRoot, 'venv', 'Scripts', 'hermes.exe')
-    : path.join(updateRoot, 'venv', 'bin', 'hermes')
+    ? path.join(updateRoot, '.venv', 'Scripts', 'hermes.exe')
+    : path.join(updateRoot, '.venv', 'bin', 'hermes')
 }
 
 // Best-effort lock probe mirroring the Rust updater's is_locked(): a running
@@ -2556,7 +2556,7 @@ async function applyUpdates(opts = {}) {
       updaterArgs.push('--target-app', targetApp)
     }
 
-    const venvBin = path.join(updateRoot, 'venv', IS_WINDOWS ? 'Scripts' : 'bin')
+    const venvBin = path.join(updateRoot, '.venv', IS_WINDOWS ? 'Scripts' : 'bin')
 
     // Stop our own backend(s) and wait for the venv shim to unlock BEFORE we
     // spawn the updater. Without this the updater races a still-locked
@@ -2643,7 +2643,7 @@ async function handOffWindowsBootstrapRecovery(reason) {
     ? await resolveHealedBranch(updateRoot, configuredBranch || DEFAULT_UPDATE_BRANCH)
     : configuredBranch || DEFAULT_UPDATE_BRANCH
 
-  const venvBin = path.join(updateRoot, 'venv', IS_WINDOWS ? 'Scripts' : 'bin')
+  const venvBin = path.join(updateRoot, '.venv', IS_WINDOWS ? 'Scripts' : 'bin')
   const venvHermes = path.join(venvBin, IS_WINDOWS ? 'hermes.exe' : 'hermes')
   const venvPython = path.join(venvBin, IS_WINDOWS ? 'python.exe' : 'python')
 
@@ -2698,7 +2698,7 @@ async function handOffWindowsBootstrapRecovery(reason) {
 // Resolve the hermes CLI to drive an in-app update: prefer the venv shim in
 // the install we're updating, fall back to `hermes` on PATH.
 function resolveHermesCliBinary(updateRoot) {
-  const venvHermes = path.join(updateRoot, 'venv', 'bin', 'hermes')
+  const venvHermes = path.join(updateRoot, '.venv', 'bin', 'hermes')
 
   if (fileExists(venvHermes)) {
     return venvHermes
@@ -2783,7 +2783,7 @@ async function applyUpdatesPosixInApp(opts: any) {
   // Node lives directly under %LOCALAPPDATA%\hermes\node, not node\bin.
   const env: Record<string, string> = {
     HERMES_HOME,
-    PATH: pathWithHermesManagedNode(path.join(updateRoot, 'venv', 'bin'))
+    PATH: pathWithHermesManagedNode(path.join(updateRoot, '.venv', 'bin'))
   }
 
   // `hermes update` reaps stale `hermes serve` backends (a code update

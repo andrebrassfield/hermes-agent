@@ -21,7 +21,7 @@ const MAX_CONCURRENCY = 32
 // Big trees that are never themselves repos and would waste the walk. Anything
 // hidden (dotdirs like .cache/.Trash/.npm) is skipped wholesale below, so this
 // only needs the non-hidden heavyweights.
-const JUNK_DIRS = new Set(['Applications', 'Library', 'node_modules', 'site-packages', 'vendor', 'venv'])
+const JUNK_DIRS = new Set(['Applications', 'Library', 'node_modules', 'site-packages', 'vendor'])
 
 async function mapLimit(items, limit, fn) {
   let cursor = 0

@@ -9315,3 +9315,12 @@ def _inject_platform_plugin_env_vars() -> None:
 # Eagerly inject so that platform plugin env vars show up in the setup wizard.
 _inject_platform_plugin_env_vars()
 
+
+# Re-export from hermes_constants — canonical definition lives there. Many
+# modules do `from hermes_cli.config import get_hermes_home`; the v2026.7.20
+# (Quicksilver) merge dropped these two re-export lines, breaking ~22 importers
+# (incl. hermes_cli.main at import time). Restored to match the pre-merge API.
+from hermes_constants import get_hermes_home  # noqa: F811,E402
+from hermes_constants import get_default_hermes_root  # noqa: F811,E402
+from hermes_constants import get_process_hermes_home  # noqa: F811,E402
+
